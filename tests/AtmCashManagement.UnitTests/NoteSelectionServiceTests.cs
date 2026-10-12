@@ -246,6 +246,33 @@ public sealed class NoteSelectionServiceTests
         Assert.Null(result.Upper);
     }
 
+    [Fact]
+    public void Exact_payout_over_the_remaining_limit_is_replaced_by_a_permitted_lower_option()
+    {
+        var result = _service.Select(Currency.TRY, 100,
+        [
+            Stock(1, BanknoteDenomination.OneHundred, 1),
+            Stock(2, BanknoteDenomination.Twenty, 4)
+        ], remainingDailyLimit: 80);
+
+        Assert.Equal(NoteSelectionOutcome.Alternatives, result.Outcome);
+        Assert.Null(result.Exact);
+        AssertOption(result.Lower, 80, 4, (BanknoteDenomination.Twenty, 4));
+        Assert.Null(result.Upper);
+    }
+
+    [Fact]
+    public void No_option_is_returned_when_every_payout_exceeds_the_remaining_daily_limit()
+    {
+        var result = _service.Select(Currency.TRY, 20,
+        [Stock(1, BanknoteDenomination.Twenty, 1)], remainingDailyLimit: 19);
+
+        Assert.Equal(NoteSelectionOutcome.NoPermittedPayout, result.Outcome);
+        Assert.Null(result.Exact);
+        Assert.Null(result.Lower);
+        Assert.Null(result.Upper);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]

@@ -5,12 +5,14 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using AtmCashManagement.Api.Infrastructure.Persistence;
+using AtmCashManagement.Api.Application;
 using Npgsql;
 
 namespace AtmCashManagement.IntegrationTests;
 
 public sealed class AtmApiFixture : IAsyncLifetime
 {
+    private const string TestCardHmacKey = "integration-only-card-hmac-key-32-bytes-minimum";
     private readonly string _adminConnectionString;
     private string _schema = string.Empty;
     private WebApplicationFactory<Program>? _factory;
@@ -25,6 +27,7 @@ public sealed class AtmApiFixture : IAsyncLifetime
     }
 
     public HttpClient Client { get; private set; } = null!;
+    public ManualTestClock Clock { get; } = new();
     public IServiceProvider Services => _factory?.Services ?? throw new InvalidOperationException("The API test host is not initialized.");
 
     public async Task InitializeAsync()
@@ -47,10 +50,13 @@ public sealed class AtmApiFixture : IAsyncLifetime
             builder.ConfigureAppConfiguration((_, configuration) =>
                 configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
-                    ["ConnectionStrings:AtmDatabase"] = isolatedConnectionString
+                    ["ConnectionStrings:AtmDatabase"] = isolatedConnectionString,
+                    ["CardSecurity:CardNumberHmacKey"] = TestCardHmacKey
                 }));
             builder.ConfigureServices(services =>
             {
+                services.RemoveAll<IClock>();
+                services.AddSingleton<IClock>(Clock);
                 services.RemoveAll<AtmDbContext>();
                 services.RemoveAll<DbContextOptions<AtmDbContext>>();
                 services.AddDbContext<AtmDbContext>(options => options.UseNpgsql(isolatedConnectionString));
@@ -64,13 +70,16 @@ public sealed class AtmApiFixture : IAsyncLifetime
 
     public async Task ResetDatabaseAsync()
     {
+        Clock.SetUtcNow(ManualTestClock.DefaultUtcNow);
         await using var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(_adminConnectionString)
         {
             SearchPath = _schema
         }.ConnectionString);
         await connection.OpenAsync();
         await using var command = new NpgsqlCommand(
-            "TRUNCATE TABLE cash_reconciliation_lines, cash_reconciliations, cash_deposit_notes, cash_deposits, " +
+            "TRUNCATE TABLE confirm_idempotency_records, cash_withdrawals, quote_reservations, " +
+            "withdrawal_quote_option_allocations, withdrawal_quote_options, withdrawal_quotes, card_daily_limit_usages, " +
+            "cash_reconciliation_lines, cash_reconciliations, cash_deposit_notes, cash_deposits, " +
             "cassette_movements, cassette_balances, cassettes, atms CASCADE",
             connection);
         await command.ExecuteNonQueryAsync();

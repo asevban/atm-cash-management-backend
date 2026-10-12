@@ -86,4 +86,35 @@ public sealed class CassetteBalance
 
         PhysicalCount = countedCount;
     }
+
+    public void ReserveNotes(int count)
+    {
+        if (count <= 0 || (long)ReservedCount + count > PhysicalCount)
+        {
+            throw new InvalidOperationException("The requested notes are not available for reservation.");
+        }
+
+        ReservedCount += count;
+    }
+
+    public void ReleaseReservedNotes(int count)
+    {
+        if (count <= 0 || count > ReservedCount)
+        {
+            throw new InvalidOperationException("The requested reservation cannot be released.");
+        }
+
+        ReservedCount -= count;
+    }
+
+    public void ConsumeReservedNotes(int count)
+    {
+        if (count <= 0 || count > ReservedCount || count > PhysicalCount)
+        {
+            throw new InvalidOperationException("The requested reserved notes cannot be consumed.");
+        }
+
+        PhysicalCount -= count;
+        ReservedCount -= count;
+    }
 }

@@ -55,6 +55,49 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CardDailyLimitUsage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("BusinessDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("CardIdentifier")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<int>("ConfirmedAmount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("ReservedAmount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CardIdentifier", "Currency", "BusinessDate")
+                        .IsUnique();
+
+                    b.ToTable("card_daily_limit_usages", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_card_daily_limit_usages_confirmed", "\"ConfirmedAmount\" >= 0");
+
+                            t.HasCheckConstraint("ck_card_daily_limit_usages_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_card_daily_limit_usages_identifier", "length(\"CardIdentifier\") = 64");
+
+                            t.HasCheckConstraint("ck_card_daily_limit_usages_reserved", "\"ReservedAmount\" >= 0");
+                        });
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDeposit", b =>
                 {
                     b.Property<Guid>("Id")
@@ -189,6 +232,57 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("ck_cash_reconciliation_lines_difference", "\"DifferenceCount\" = \"CountedCount\" - \"ExpectedCount\"");
 
                             t.HasCheckConstraint("ck_cash_reconciliation_lines_expected", "\"ExpectedCount\" BETWEEN 0 AND 100");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashWithdrawal", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Amount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CardIdentifier")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OptionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("QuoteId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtmId");
+
+                    b.HasIndex("OptionId");
+
+                    b.HasIndex("QuoteId")
+                        .IsUnique();
+
+                    b.ToTable("cash_withdrawals", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cash_withdrawals_amount", "\"Amount\" > 0");
+
+                            t.HasCheckConstraint("ck_cash_withdrawals_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_cash_withdrawals_identifier", "length(\"CardIdentifier\") = 64");
                         });
                 });
 
@@ -346,6 +440,230 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.ConfirmIdempotencyRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("QuoteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SelectedOptionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("WithdrawalId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Key")
+                        .IsUnique();
+
+                    b.HasIndex("QuoteId");
+
+                    b.HasIndex("SelectedOptionId");
+
+                    b.HasIndex("WithdrawalId");
+
+                    b.ToTable("confirm_idempotency_records", (string)null);
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.QuoteReservation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CassetteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("Denomination")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("QuoteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ReservedCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CassetteId");
+
+                    b.HasIndex("QuoteId", "CassetteId", "Currency", "Denomination")
+                        .IsUnique();
+
+                    b.ToTable("quote_reservations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_quote_reservations_count", "\"ReservedCount\" > 0");
+
+                            t.HasCheckConstraint("ck_quote_reservations_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_quote_reservations_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CardIdentifier")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset?>("ClosedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<DateTimeOffset>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateOnly>("LimitBusinessDate")
+                        .HasColumnType("date");
+
+                    b.Property<int>("LimitReservedAmount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RequestedAmount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("character varying(12)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtmId", "Status", "ExpiresAtUtc");
+
+                    b.HasIndex("CardIdentifier", "LimitBusinessDate", "Currency");
+
+                    b.ToTable("withdrawal_quotes", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_withdrawal_quotes_card_identifier", "length(\"CardIdentifier\") = 64");
+
+                            t.HasCheckConstraint("ck_withdrawal_quotes_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_withdrawal_quotes_limit_reservation", "\"LimitReservedAmount\" > 0");
+
+                            t.HasCheckConstraint("ck_withdrawal_quotes_requested_amount", "\"RequestedAmount\" > 0");
+
+                            t.HasCheckConstraint("ck_withdrawal_quotes_status", "\"Status\" IN ('Active', 'Confirmed', 'Cancelled', 'Expired')");
+
+                            t.HasCheckConstraint("ck_withdrawal_quotes_utc_window", "\"ExpiresAtUtc\" > \"CreatedAtUtc\"");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Amount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<int>("NoteCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("QuoteId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("QuoteId", "Kind")
+                        .IsUnique();
+
+                    b.ToTable("withdrawal_quote_options", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_withdrawal_quote_options_amount", "\"Amount\" > 0");
+
+                            t.HasCheckConstraint("ck_withdrawal_quote_options_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_withdrawal_quote_options_kind", "\"Kind\" IN ('Exact', 'Lower', 'Upper')");
+
+                            t.HasCheckConstraint("ck_withdrawal_quote_options_note_count", "\"NoteCount\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOptionAllocation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CassetteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("Denomination")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("OptionId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CassetteId");
+
+                    b.HasIndex("OptionId", "CassetteId", "Currency", "Denomination")
+                        .IsUnique();
+
+                    b.ToTable("withdrawal_quote_option_allocations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_withdrawal_quote_option_allocations_count", "\"Count\" > 0");
+
+                            t.HasCheckConstraint("ck_withdrawal_quote_option_allocations_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_withdrawal_quote_option_allocations_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
+                        });
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDeposit", b =>
                 {
                     b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", null)
@@ -394,6 +712,33 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                     b.Navigation("Cassette");
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashWithdrawal", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", "Option")
+                        .WithMany()
+                        .HasForeignKey("OptionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", "Quote")
+                        .WithMany()
+                        .HasForeignKey("QuoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Atm");
+
+                    b.Navigation("Option");
+
+                    b.Navigation("Quote");
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>
                 {
                     b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
@@ -435,6 +780,87 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                     b.Navigation("Cassette");
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.ConfirmIdempotencyRecord", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", null)
+                        .WithMany()
+                        .HasForeignKey("QuoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", null)
+                        .WithMany()
+                        .HasForeignKey("SelectedOptionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.CashWithdrawal", "Withdrawal")
+                        .WithMany()
+                        .HasForeignKey("WithdrawalId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Withdrawal");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.QuoteReservation", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Cassette", "Cassette")
+                        .WithMany()
+                        .HasForeignKey("CassetteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", "Quote")
+                        .WithMany("Reservations")
+                        .HasForeignKey("QuoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Cassette");
+
+                    b.Navigation("Quote");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", null)
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", "Quote")
+                        .WithMany("Options")
+                        .HasForeignKey("QuoteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Quote");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOptionAllocation", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Cassette", "Cassette")
+                        .WithMany()
+                        .HasForeignKey("CassetteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", "Option")
+                        .WithMany("Allocations")
+                        .HasForeignKey("OptionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Cassette");
+
+                    b.Navigation("Option");
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Atm", b =>
                 {
                     b.Navigation("Cassettes");
@@ -453,6 +879,18 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>
                 {
                     b.Navigation("Balances");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuote", b =>
+                {
+                    b.Navigation("Options");
+
+                    b.Navigation("Reservations");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.WithdrawalQuoteOption", b =>
+                {
+                    b.Navigation("Allocations");
                 });
 #pragma warning restore 612, 618
         }

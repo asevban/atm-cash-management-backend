@@ -13,6 +13,13 @@ public sealed class AtmDbContext(DbContextOptions<AtmDbContext> options) : DbCon
     public DbSet<CashDepositNote> CashDepositNotes => Set<CashDepositNote>();
     public DbSet<CashReconciliation> CashReconciliations => Set<CashReconciliation>();
     public DbSet<CashReconciliationLine> CashReconciliationLines => Set<CashReconciliationLine>();
+    public DbSet<WithdrawalQuote> WithdrawalQuotes => Set<WithdrawalQuote>();
+    public DbSet<WithdrawalQuoteOption> WithdrawalQuoteOptions => Set<WithdrawalQuoteOption>();
+    public DbSet<WithdrawalQuoteOptionAllocation> WithdrawalQuoteOptionAllocations => Set<WithdrawalQuoteOptionAllocation>();
+    public DbSet<QuoteReservation> QuoteReservations => Set<QuoteReservation>();
+    public DbSet<CardDailyLimitUsage> CardDailyLimitUsages => Set<CardDailyLimitUsage>();
+    public DbSet<CashWithdrawal> CashWithdrawals => Set<CashWithdrawal>();
+    public DbSet<ConfirmIdempotencyRecord> ConfirmIdempotencyRecords => Set<ConfirmIdempotencyRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -53,13 +53,19 @@ public sealed class NoteSelectionService : INoteSelectionService
         var maximumAmount = matchingStocks.Sum(stock => stock.AvailableCount() * (int)stock.Denomination!.Value);
         var (minimumNotesByAmount, steps) = BuildBoundedDynamicProgram(maximumAmount, countsByDenomination);
 
-        if (requestedAmount <= maximumAmount && minimumNotesByAmount[requestedAmount] != Unreachable)
+        var exactWithinLimit = remainingDailyLimit is null || requestedAmount <= remainingDailyLimit.Value;
+        if (exactWithinLimit && requestedAmount <= maximumAmount && minimumNotesByAmount[requestedAmount] != Unreachable)
         {
             var exact = BuildOption(currency, requestedAmount, minimumNotesByAmount[requestedAmount], steps, matchingStocks);
             return new NoteSelectionResult(NoteSelectionOutcome.Exact, exact, null, null);
         }
 
         var lowerAmount = Math.Min(requestedAmount - 1, maximumAmount);
+        if (remainingDailyLimit.HasValue)
+        {
+            lowerAmount = Math.Min(lowerAmount, remainingDailyLimit.Value);
+        }
+
         while (lowerAmount > 0 && minimumNotesByAmount[lowerAmount] == Unreachable)
         {
             lowerAmount--;

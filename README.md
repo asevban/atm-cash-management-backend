@@ -1,6 +1,6 @@
 # ATM Cash Management Backend
 
-ASP.NET Core 10 REST API for per-ATM cassette configuration, initial and maintenance cash loading, lifecycle control, balance reporting, and the first stage of the cassette movement ledger. It also includes a pure application service for optimal banknote selection from a supplied stock snapshot. PostgreSQL is accessed through EF Core Code First. Pending migrations are applied automatically when the API starts.
+ASP.NET Core 10 REST API for per-ATM cassette configuration, cash loading and deposits, lifecycle control, balance reporting, reconciliations, and reserved withdrawal quote/confirm flows. PostgreSQL is accessed through EF Core Code First. Pending migrations are applied automatically when the API starts.
 
 ## Requirements
 
@@ -12,6 +12,7 @@ ASP.NET Core 10 REST API for per-ATM cassette configuration, initial and mainten
 From the repository root:
 
 ```powershell
+$env:CARD_NUMBER_HMAC_KEY = "<stable secret with at least 32 bytes>"
 docker compose up --build -d
 ```
 
@@ -24,6 +25,8 @@ PostgreSQL must pass its readiness check before the API starts. The API listens 
 Stop the containers with `docker compose down`. The named `postgres-data` volume keeps the local database between runs. Use `docker compose down --volumes` only when you intentionally want to delete that database.
 
 The default PostgreSQL credentials in `compose.yaml` and `appsettings.json` are for local development only. Replace them with managed secrets before any shared or production deployment. Compose values can be overridden with `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` environment variables.
+
+`CARD_NUMBER_HMAC_KEY` is required and must remain stable for the database's lifetime. It is used to create a deterministic HMAC-SHA256 card identifier; the key and original card number are never stored in the database. Supply the key through the environment or a secret manager and do not commit it.
 
 ## API endpoints
 
@@ -40,6 +43,19 @@ All enum values in JSON are strings. Lifecycle values are `UNCONFIGURED`, `CONFI
 | `GET` | `/api/atms/{id}/balances` | Get per-cassette note counts and separate totals for TRY, USD, and EUR. |
 | `POST` | `/api/atms/{id}/deposits` | Accept recognized customer notes while the ATM is in service. |
 | `POST` | `/api/atms/{id}/reconciliations` | Record a complete physical cassette snapshot in maintenance. |
+| `POST` | `/api/atms/{id}/withdrawal-quotes` | Reserve eligible recycling notes and create a 60-second withdrawal quote. |
+| `POST` | `/api/withdrawal-quotes/{quoteId}/confirm` | Confirm one quote option; requires the `Idempotency-Key` header. |
+| `POST` | `/api/withdrawal-quotes/{quoteId}/cancel` | Cancel an active quote and release its reservations. |
+
+### Withdrawal quote and confirm (A9, A10, B4–B6)
+
+Create a quote with `{ "cardNumber": "4111111111111111", "currency": "TRY", "requestedAmount": 280 }`. Only `TRY`, `USD`, and `EUR` are accepted. The ATM must be `IN_SERVICE`. The response includes a `quoteId`, `expiresAt` in UTC, quote status, and exact or payable alternative options. Each option identifies its amount, note count, denominations, and cassette allocations. `INoteSelectionService` provides the B3 minimum-note plan and cassette allocation; only recycling cassettes and notes not already reserved are eligible. If exact payment is impossible, lower and upper options are offered when payable, with an upper option omitted when it exceeds the remaining daily limit. A ProblemDetails response explains when no option can be paid and reserved.
+
+The quote is reserved atomically when created. If two options are offered, the reservation for each cassette/currency/denomination is the maximum allocation required by either option, so overlapping notes are reserved once. The per-option allocations remain distinct. Confirming one option consumes its allocated notes and releases any excess reservation. A quote can be confirmed once; a cancelled or expired quote cannot be confirmed. Cancellation is safe to repeat, while a confirmed quote cannot be cancelled.
+
+Confirm with `{ "selectedOptionId": "<option-guid>" }` and an `Idempotency-Key` header. Repeating the same key and request returns the stored successful result without another withdrawal; reusing the key for a different quote or option returns `409 Conflict`. A different key cannot withdraw from an already confirmed quote. Quote creation, reservation, confirmation, cancellation, and expiration update the quote, balances, daily limit usage, withdrawal, idempotency result, and cassette movements in database transactions.
+
+Quotes expire after 60 seconds. A hosted worker releases overdue reservations, and quote API operations also check expiration while holding the same database locks, so worker delay does not allow expired notes to be confirmed or re-offered. Expiration is capped at midnight in the `Europe/Istanbul` calendar, and a new quote is required on the next local date. Each card has a shared daily limit across ATMs and per currency: TRY 20,000, USD 1,000, EUR 1,000. Confirmed withdrawals plus the maximum payable option reserved by each active quote count against the limit; the alternatives are not added together. Cancel and expiration release the reserved limit. The day boundary uses the Europe/Istanbul calendar, including daylight-saving rules from the host time-zone database.
 
 ### Configure cassettes
 
@@ -106,7 +122,7 @@ The response identifies the deposit transaction, accepted currency/denomination 
 
 `POST /api/atms/{id}/reconciliations` requires a full snapshot containing cassette slots 1 through 5, and is available only in `MAINTENANCE`. Each cassette has a `notes` array of physical currency/denomination counts. A note type omitted from an included cassette's array is explicitly counted as zero. Deposit-only cassettes may contain mixed note types; recycling cassettes accept only their configured type. Negative counts, duplicate note types, missing cassette slots, and totals above cassette capacity are rejected before any write. Reconciliation is maintenance-only: initial setup already captures the physical stock through the mandatory five-cassette initial load, while the project has no separate reconciliation lifecycle before that load.
 
-The system compares each counted type with its current physical count (an absent existing or counted type is treated as zero), stores expected, counted, and signed difference counts in a reconciliation snapshot, then sets physical balances to the counted values. Each non-zero difference creates one `RECONCILIATION_ADJUSTMENT` movement; a repeated unchanged snapshot records its evidence but creates no adjustment movement. Existing reserved counts are never changed. Since there is not yet a reservation release/confirm workflow, reconciliation is rejected if any cassette has reserved notes. The snapshot header and lines retain an audit record that can be extended with B9 approval state later; this phase does not implement approval or user identity.
+The system compares each counted type with its current physical count (an absent existing or counted type is treated as zero), stores expected, counted, and signed difference counts in a reconciliation snapshot, then sets physical balances to the counted values. Each non-zero difference creates one `RECONCILIATION_ADJUSTMENT` movement; a repeated unchanged snapshot records its evidence but creates no adjustment movement. Existing reserved counts are never changed. Reconciliation is rejected while any cassette has reserved notes, avoiding conflicts with active withdrawal quotes. The snapshot header and lines retain an audit record that can be extended with B9 approval state later; this phase does not implement approval or user identity.
 
 The response includes expected and counted counts per cassette/note type, count differences, currency-specific value differences, and a summary of changed cassettes. The request shape is:
 
@@ -124,7 +140,7 @@ The response includes expected and counted counts per cassette/note type, count 
 
 ### Optimal note selection (B3)
 
-`INoteSelectionService` accepts a requested currency and amount, cassette stock snapshots, and an optional remaining daily limit for filtering an upper alternative. It uses only matching `RECYCLING` cassettes. Available notes are `PhysicalCount - ReservedCount`; deposit-only stock and notes reserved by another operation are excluded. The service returns an exact option when possible, otherwise the closest payable lower and upper amounts with their minimum-note allocations. An upper option above the supplied limit is omitted. The service only calculates a plan: it does not reserve notes, change balances, write movement rows, or read from EF Core. No B3 HTTP endpoint is exposed yet.
+`INoteSelectionService` accepts a requested currency and amount, cassette stock snapshots, and an optional remaining daily limit. It uses only matching `RECYCLING` cassettes. Available notes are `PhysicalCount - ReservedCount`; deposit-only stock and notes reserved by another operation are excluded. The service returns an exact option when possible, otherwise the closest payable lower and upper amounts with their minimum-note allocations. Options above the supplied limit are omitted. The service calculates plans; the withdrawal application service reserves the resulting allocations transactionally.
 
 The selector uses bounded dynamic programming grouped by denomination, not a greedy largest-note-first rule. For each denomination, a sliding-window transition considers only the available count and records the minimum note count for each reachable total. Processing denominations from largest to smallest gives deterministic denomination tie-breaking; the bounded transition takes fewer notes of the current denomination when note counts tie. It reconstructs choices using per-denomination decision arrays. With at most four recycling cassettes, 100 notes per cassette, and denominations up to 500, the amount range is at most 200,000; time is O(D × M) and reconstruction storage is O(D × M), where D ≤ 4 denomination groups and M is the maximum payable total.
 
@@ -142,13 +158,18 @@ The schema contains:
 - `CassetteMovement`: append-only movement records with ATM/cassette, type, currency, denomination, physical and reserved count deltas, timestamp, transaction reference, and an initial-load marker.
 - `CashDeposit` and `CashDepositNote`: deposit transaction time, unrecognized return count, and requested/accepted/returned note counts by currency and denomination.
 - `CashReconciliation` and `CashReconciliationLine`: timestamped full snapshot evidence by cassette/note type, including expected, counted, and difference counts.
+- `WithdrawalQuote`, `WithdrawalQuoteOption`, `WithdrawalQuoteOptionAllocation`, and `QuoteReservation`: expiring quote state, individual selectable plans, and the combined cassette-level reservation.
+- `CashWithdrawal`, `CardDailyLimitUsage`, and `ConfirmIdempotencyRecord`: confirmed withdrawal facts, card/currency/day limit usage, and durable successful confirm replay results. Card identifiers are HMAC-SHA256 values.
 
-The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. This phase writes `LOAD`, `DEPOSIT`, and `RECONCILIATION_ADJUSTMENT` movements. Deposit and reconciliation movements use their transaction/snapshot ID as the reference. There are no movement edit/delete endpoints; other movement workflows and the B8 consistency endpoint are deferred.
+The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. Withdrawal quote creation writes `RESERVATION`; confirmation writes `WITHDRAWAL` for physical and reserved counts consumed and `RESERVATION_RELEASE` for unused reserved notes. Cancellation and expiration write `RESERVATION_RELEASE`. References point to the quote or withdrawal transaction. There are no movement edit/delete endpoints; the B8 consistency endpoint is deferred.
 
 ## Data integrity and transaction decisions
 
 - The database constrains slot numbers to 1 through 5 and has a unique `(AtmId, Number)` index. Together these ensure an ATM cannot have more than five slots or duplicate a physical slot. The application requires exactly five distinct slots, one deposit-only and four recycling cassettes, before saving configuration. This exact-count check is not implemented as a row `CHECK` constraint because such a constraint cannot count related cassette rows.
-- Configuration, loading, state changes, deposits, and reconciliations lock the ATM row with `SELECT ... FOR UPDATE` inside a database transaction. This serializes conflicting operations for the same ATM while allowing work on separate ATMs to proceed independently.
+- Configuration, loading, state changes, deposits, reconciliations, and withdrawal operations lock the ATM row with `SELECT ... FOR UPDATE` inside a database transaction. Withdrawal operations acquire locks in a consistent order: daily-limit rows (sorted), ATM, then quote. This serializes cassette use and cancel/confirm/expiration for the same ATM/quote. Daily-limit rows are keyed by HMAC card identifier, currency, and Istanbul business date, and locked in PostgreSQL across ATM instances.
+- Idempotency keys have a database unique constraint and a PostgreSQL transaction advisory lock during replay/creation. The idempotency request identity, successful response, quote state, withdrawal, balances, daily-limit transition, and ledger rows commit atomically.
+- Quote expiration uses persisted UTC timestamps and an injectable clock in tests. The expiration worker is repeatable: it locks and rechecks each active quote before releasing reservations, so competing workers and API operations cannot double-release.
+- For daily limits, an active quote reserves the maximum value of its offered options once. Confirmation moves the selected value from reserved usage to confirmed usage in the same transaction, avoiding a temporary double count.
 - A load request validates every cassette and note entry before changing balances. Physical-count updates, `LOAD` movements, and the initial-load completion marker commit in the same transaction. Invalid requests do not leave partial balance or ledger changes.
 - The initial load is considered complete when a single successful request explicitly includes slots 1 through 5, contains at least one banknote overall, and passes all type and capacity checks. Empty `notes` arrays mean those cassettes were checked and left empty. This resolves the assignment's ambiguity about the completion boundary.
 - A maintenance reconfiguration is rejected if any changed cassette has physical or reserved notes. This avoids moving cash or reservations to a different cassette configuration without an unload workflow.
@@ -169,7 +190,7 @@ $env:ATM_TEST_CONNECTION_STRING = "Host=localhost;Port=5432;Database=atm_cash_te
 dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The unit tests include the eight B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation; deposit routing tests cover matched and unmatched notes, duplicate recycling slots, overflow, capacity returns, mixed currencies, and invalid inputs. Integration tests cover the existing ATM lifecycle and balance flows, deposit placement/returns/atomic ledger updates, full and incomplete snapshots, reconciliation differences and reserved-note rejection, and real PostgreSQL movement rows.
+The unit tests include the B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation; deposit routing tests cover matched and unmatched notes, duplicate recycling slots, overflow, capacity returns, mixed currencies, and invalid inputs. PostgreSQL integration tests cover exact and alternative quotes, union reservations, release/consumption, idempotency, expiration, all currency limits, HMAC storage, ATM state validation, movement rows, and concurrent quote/confirm/cancel races.
 
 ## EF Core migrations
 
@@ -186,7 +207,8 @@ dotnet ef migrations add MigrationName --project src/AtmCashManagement.Api --sta
 
 ## Unfinished items and limitations
 
-- Withdrawal quote/confirm (B4), daily card-limit management (B5), parallel quote handling (B6), reservation creation/release as part of the withdrawal workflow, B9 four-eyes/X-User approval and TRY 1,000 threshold, B10 general TRY conversion and advanced operational reports/alerts/outbox, and the B8 ledger consistency endpoint are not implemented. Deposits and maintenance reconciliation are implemented; no withdrawal endpoint is present. The B3 note-selection calculation is implemented as an application service, but it is not yet wired to a withdrawal endpoint.
+- B9 four-eyes/X-User approval and TRY 1,000 threshold, B10 general TRY conversion and advanced operational reports/alerts/outbox, and the B8 ledger consistency endpoint are not implemented. Authentication and authorization remain out of scope.
+- Rotating `CARD_NUMBER_HMAC_KEY` changes card identifiers and therefore starts new limit histories; production key rotation needs an explicit migration strategy. A time-zone database with `Europe/Istanbul` (or Windows `Turkey Standard Time`) must be available to the API runtime.
 - The ledger is append-only through the current API surface, but database-level immutability triggers and ledger-based balance reconstruction are deferred to the B8 phase.
 - Authentication and authorization are outside the current scope. Local Compose credentials are development-only.
 - The initial load must cover all five slots in one request. No endpoint pre-creates empty slots; configuration creates each physical slot once, protected by the ATM/slot uniqueness constraint.

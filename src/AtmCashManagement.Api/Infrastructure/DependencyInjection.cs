@@ -20,8 +20,12 @@ public static class DependencyInjection
         services.AddDbContext<AtmDbContext>(options => options.UseNpgsql(connectionString));
         services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("database");
         services.AddScoped<AtmManagementService>();
+        services.AddScoped<WithdrawalQuoteService>();
         services.AddSingleton<INoteSelectionService, NoteSelectionService>();
         services.AddSingleton<DepositAllocationPlanner>();
+        services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<CardIdentifierService>();
+        services.AddHostedService<QuoteExpirationBackgroundService>();
 
         return services;
     }
