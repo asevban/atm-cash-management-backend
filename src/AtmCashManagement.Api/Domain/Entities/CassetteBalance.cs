@@ -71,4 +71,19 @@ public sealed class CassetteBalance
 
         PhysicalCount += count;
     }
+
+    public void ReconcilePhysicalCount(int countedCount)
+    {
+        if (countedCount is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(countedCount), "Physical note count must be between 0 and 100.");
+        }
+
+        if (ReservedCount > countedCount)
+        {
+            throw new InvalidOperationException("Physical count cannot be reconciled below the reserved note count.");
+        }
+
+        PhysicalCount = countedCount;
+    }
 }

@@ -51,6 +51,28 @@ public sealed class AtmsController(AtmManagementService service) : ControllerBas
         CancellationToken cancellationToken) =>
         Ok(await service.LoadCashAsync(id, request, cancellationToken));
 
+    [HttpPost("{id:guid}/deposits")]
+    [ProducesResponseType<CashDepositResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<CashDepositResponse>> Deposit(
+        Guid id,
+        [FromBody] CashDepositRequest request,
+        CancellationToken cancellationToken) =>
+        Ok(await service.DepositAsync(id, request, cancellationToken));
+
+    [HttpPost("{id:guid}/reconciliations")]
+    [ProducesResponseType<CashReconciliationResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<CashReconciliationResponse>> Reconcile(
+        Guid id,
+        [FromBody] CashReconciliationRequest request,
+        CancellationToken cancellationToken) =>
+        Ok(await service.ReconcileAsync(id, request, cancellationToken));
+
     [HttpPost("{id:guid}/state")]
     [ProducesResponseType<AtmResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]

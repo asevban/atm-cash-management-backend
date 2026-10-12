@@ -25,6 +25,7 @@ public sealed class AtmApiFixture : IAsyncLifetime
     }
 
     public HttpClient Client { get; private set; } = null!;
+    public IServiceProvider Services => _factory?.Services ?? throw new InvalidOperationException("The API test host is not initialized.");
 
     public async Task InitializeAsync()
     {
@@ -69,7 +70,8 @@ public sealed class AtmApiFixture : IAsyncLifetime
         }.ConnectionString);
         await connection.OpenAsync();
         await using var command = new NpgsqlCommand(
-            "TRUNCATE TABLE cassette_movements, cassette_balances, cassettes, atms CASCADE",
+            "TRUNCATE TABLE cash_reconciliation_lines, cash_reconciliations, cash_deposit_notes, cash_deposits, " +
+            "cassette_movements, cassette_balances, cassettes, atms CASCADE",
             connection);
         await command.ExecuteNonQueryAsync();
     }
@@ -85,6 +87,34 @@ public sealed class AtmApiFixture : IAsyncLifetime
             "SELECT COUNT(*) FROM cassette_movements WHERE \"Type\" = 'Load' AND \"IsInitialLoad\"",
             connection);
         return Convert.ToInt32(await command.ExecuteScalarAsync());
+    }
+
+    public async Task SetReservedCountAsync(
+        Guid atmId,
+        int cassetteNumber,
+        AtmCashManagement.Api.Domain.Enums.Currency currency,
+        AtmCashManagement.Api.Domain.Enums.BanknoteDenomination denomination,
+        int reservedCount)
+    {
+        await using var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(_adminConnectionString)
+        {
+            SearchPath = _schema
+        }.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "UPDATE cassette_balances SET \"ReservedCount\" = @reserved " +
+            "WHERE \"CassetteId\" = (SELECT \"Id\" FROM cassettes WHERE \"AtmId\" = @atm AND \"Number\" = @number) " +
+            "AND \"Currency\" = @currency AND \"Denomination\" = @denomination",
+            connection);
+        command.Parameters.AddWithValue("reserved", reservedCount);
+        command.Parameters.AddWithValue("atm", atmId);
+        command.Parameters.AddWithValue("number", cassetteNumber);
+        command.Parameters.AddWithValue("currency", currency.ToString());
+        command.Parameters.AddWithValue("denomination", (short)denomination);
+        if (await command.ExecuteNonQueryAsync() != 1)
+        {
+            throw new InvalidOperationException("The requested cassette balance row was not found.");
+        }
     }
 
     public async Task DisposeAsync()

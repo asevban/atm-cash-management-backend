@@ -38,6 +38,8 @@ All enum values in JSON are strings. Lifecycle values are `UNCONFIGURED`, `CONFI
 | `POST` | `/api/atms/{id}/load` | Record the initial or a maintenance cash load. |
 | `POST` | `/api/atms/{id}/state` | Request a valid lifecycle transition. Body: `{ "state": "IN_SERVICE" }`. |
 | `GET` | `/api/atms/{id}/balances` | Get per-cassette note counts and separate totals for TRY, USD, and EUR. |
+| `POST` | `/api/atms/{id}/deposits` | Accept recognized customer notes while the ATM is in service. |
+| `POST` | `/api/atms/{id}/reconciliations` | Record a complete physical cassette snapshot in maintenance. |
 
 ### Configure cassettes
 
@@ -82,7 +84,43 @@ Recycling cassettes accept only their configured currency and denomination. Depo
 
 The operation endpoints advance initial setup automatically: successful configuration changes `UNCONFIGURED` to `CONFIGURED`, and a successful first load changes `CONFIGURED` to `LOADED`. The state endpoint then supports `LOADED` to `IN_SERVICE`, `IN_SERVICE` to `MAINTENANCE`, and `MAINTENANCE` back to `IN_SERVICE`. It rejects other transitions and verifies the complete configuration and initial-load record before returning an ATM to service.
 
-Central, testable state rules also expose checks for customer cash operations (allowed only in `IN_SERVICE`), loading (initially in `CONFIGURED`, later in `MAINTENANCE`), configuration (initially in `UNCONFIGURED`, later in `MAINTENANCE`), and reconciliation (in `MAINTENANCE`). Withdrawal, deposit, and reconciliation endpoints are not part of this phase.
+Central, testable state rules expose checks for customer cash operations (allowed only in `IN_SERVICE`), loading (initially in `CONFIGURED`, later in `MAINTENANCE`), configuration (initially in `UNCONFIGURED`, later in `MAINTENANCE`), and reconciliation (in `MAINTENANCE`). Deposits are accepted only in `IN_SERVICE`; physical reconciliation is accepted only in `MAINTENANCE`.
+
+### Deposits (A11, B7)
+
+`POST /api/atms/{id}/deposits` accepts note counts grouped by currency and denomination, plus a count of unrecognized notes. The request must contain at least one recognized or unrecognized note. Recognized notes are routed to matching recycling cassettes in ascending cassette slot order. If no recycling cassette matches, or matching cassettes run out of room, the remaining notes go to the deposit-only cassette. Its shared capacity is calculated from the physical count of every currency and denomination it contains. Notes that still do not fit are returned with currency, denomination, and count in `capacityReturns`; unrecognized notes are returned separately and are never stored. The order across different note types is deterministic: currency enum order (`TRY`, `USD`, `EUR`), then denomination ascending. This ordering only determines which types get any remaining shared deposit-only capacity; it does not use the withdrawal fill-ratio preference.
+
+The response identifies the deposit transaction, accepted currency/denomination totals, each cassette placement, capacity returns, unrecognized return count, and accepted value totals by currency. Only placed notes increase physical balances. Deposit-only balances remain excluded from withdrawal stock because B3 selects notes from recycling cassettes only. The ATM row is locked with `SELECT ... FOR UPDATE` in a database transaction before capacities are read, so concurrent operations on one ATM serialize. The deposit header, note-level accepted/returned counts, balance changes, and `DEPOSIT` movements commit together. A fully returned but otherwise valid deposit is still recorded with zero accepted placements.
+
+```json
+{
+  "notes": [
+    { "currency": "TRY", "denomination": "50", "count": 3 },
+    { "currency": "EUR", "denomination": "100", "count": 2 }
+  ],
+  "unrecognizedNoteCount": 1
+}
+```
+
+### Physical reconciliation (A8)
+
+`POST /api/atms/{id}/reconciliations` requires a full snapshot containing cassette slots 1 through 5, and is available only in `MAINTENANCE`. Each cassette has a `notes` array of physical currency/denomination counts. A note type omitted from an included cassette's array is explicitly counted as zero. Deposit-only cassettes may contain mixed note types; recycling cassettes accept only their configured type. Negative counts, duplicate note types, missing cassette slots, and totals above cassette capacity are rejected before any write. Reconciliation is maintenance-only: initial setup already captures the physical stock through the mandatory five-cassette initial load, while the project has no separate reconciliation lifecycle before that load.
+
+The system compares each counted type with its current physical count (an absent existing or counted type is treated as zero), stores expected, counted, and signed difference counts in a reconciliation snapshot, then sets physical balances to the counted values. Each non-zero difference creates one `RECONCILIATION_ADJUSTMENT` movement; a repeated unchanged snapshot records its evidence but creates no adjustment movement. Existing reserved counts are never changed. Since there is not yet a reservation release/confirm workflow, reconciliation is rejected if any cassette has reserved notes. The snapshot header and lines retain an audit record that can be extended with B9 approval state later; this phase does not implement approval or user identity.
+
+The response includes expected and counted counts per cassette/note type, count differences, currency-specific value differences, and a summary of changed cassettes. The request shape is:
+
+```json
+{
+  "cassettes": [
+    { "cassetteNumber": 1, "notes": [] },
+    { "cassetteNumber": 2, "notes": [{ "currency": "TRY", "denomination": "100", "count": 9 }] },
+    { "cassetteNumber": 3, "notes": [] },
+    { "cassetteNumber": 4, "notes": [{ "currency": "USD", "denomination": "20", "count": 30 }] },
+    { "cassetteNumber": 5, "notes": [] }
+  ]
+}
+```
 
 ### Optimal note selection (B3)
 
@@ -102,13 +140,15 @@ The schema contains:
 - `Cassette`: one physical slot number per ATM, type, capacity, and optional recycling currency and denomination.
 - `CassetteBalance`: physical and reserved counts by cassette, currency, and denomination. Available count is physical minus reserved.
 - `CassetteMovement`: append-only movement records with ATM/cassette, type, currency, denomination, physical and reserved count deltas, timestamp, transaction reference, and an initial-load marker.
+- `CashDeposit` and `CashDepositNote`: deposit transaction time, unrecognized return count, and requested/accepted/returned note counts by currency and denomination.
+- `CashReconciliation` and `CashReconciliationLine`: timestamped full snapshot evidence by cassette/note type, including expected, counted, and difference counts.
 
-The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. This phase writes `LOAD` movements only. There are no movement edit/delete endpoints; other movement workflows and the B8 consistency endpoint are deferred.
+The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. This phase writes `LOAD`, `DEPOSIT`, and `RECONCILIATION_ADJUSTMENT` movements. Deposit and reconciliation movements use their transaction/snapshot ID as the reference. There are no movement edit/delete endpoints; other movement workflows and the B8 consistency endpoint are deferred.
 
 ## Data integrity and transaction decisions
 
 - The database constrains slot numbers to 1 through 5 and has a unique `(AtmId, Number)` index. Together these ensure an ATM cannot have more than five slots or duplicate a physical slot. The application requires exactly five distinct slots, one deposit-only and four recycling cassettes, before saving configuration. This exact-count check is not implemented as a row `CHECK` constraint because such a constraint cannot count related cassette rows.
-- Configuration, loading, and state changes lock the ATM row with `SELECT ... FOR UPDATE` inside a database transaction. This serializes conflicting operations for the same ATM while allowing work on separate ATMs to proceed independently.
+- Configuration, loading, state changes, deposits, and reconciliations lock the ATM row with `SELECT ... FOR UPDATE` inside a database transaction. This serializes conflicting operations for the same ATM while allowing work on separate ATMs to proceed independently.
 - A load request validates every cassette and note entry before changing balances. Physical-count updates, `LOAD` movements, and the initial-load completion marker commit in the same transaction. Invalid requests do not leave partial balance or ledger changes.
 - The initial load is considered complete when a single successful request explicitly includes slots 1 through 5, contains at least one banknote overall, and passes all type and capacity checks. Empty `notes` arrays mean those cassettes were checked and left empty. This resolves the assignment's ambiguity about the completion boundary.
 - A maintenance reconfiguration is rejected if any changed cassette has physical or reserved notes. This avoids moving cash or reservations to a different cassette configuration without an unload workflow.
@@ -122,14 +162,14 @@ dotnet restore AtmCashManagement.sln
 dotnet build AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The xUnit suite includes domain-rule and note-selection unit tests, plus HTTP integration tests against a real PostgreSQL database. The integration fixture creates an isolated temporary schema and removes it after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated test database before running:
+The xUnit suite includes domain-rule, note-selection, and deposit-routing unit tests, plus HTTP integration tests against a real PostgreSQL database. The integration fixture creates an isolated temporary schema and removes it after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated test database before running:
 
 ```powershell
 $env:ATM_TEST_CONNECTION_STRING = "Host=localhost;Port=5432;Database=atm_cash_test;Username=atm_app;Password=dev-only-change-me;GSS Encryption Mode=Disable"
 dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The unit tests include the eight B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation. The integration tests cover create/configure/load/state/balance HTTP flows, state and configuration rejection, mixed deposit-only balances, repeated recycling pairs, exact capacity, over-capacity rejection, atomic failed loads, ATM isolation, and the real PostgreSQL movement rows.
+The unit tests include the eight B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation; deposit routing tests cover matched and unmatched notes, duplicate recycling slots, overflow, capacity returns, mixed currencies, and invalid inputs. Integration tests cover the existing ATM lifecycle and balance flows, deposit placement/returns/atomic ledger updates, full and incomplete snapshots, reconciliation differences and reserved-note rejection, and real PostgreSQL movement rows.
 
 ## EF Core migrations
 
@@ -146,7 +186,7 @@ dotnet ef migrations add MigrationName --project src/AtmCashManagement.Api --sta
 
 ## Unfinished items and limitations
 
-- Withdrawal quote/confirm, reservation creation and release, daily card-limit management, deposits, reconciliation, approvals, operational reports/alerts, outbox processing, and the B8 ledger consistency endpoint are not implemented. The B3 note-selection calculation is implemented as an application service, but it is not yet wired to a withdrawal endpoint.
+- Withdrawal quote/confirm (B4), daily card-limit management (B5), parallel quote handling (B6), reservation creation/release as part of the withdrawal workflow, B9 four-eyes/X-User approval and TRY 1,000 threshold, B10 general TRY conversion and advanced operational reports/alerts/outbox, and the B8 ledger consistency endpoint are not implemented. Deposits and maintenance reconciliation are implemented; no withdrawal endpoint is present. The B3 note-selection calculation is implemented as an application service, but it is not yet wired to a withdrawal endpoint.
 - The ledger is append-only through the current API surface, but database-level immutability triggers and ledger-based balance reconstruction are deferred to the B8 phase.
 - Authentication and authorization are outside the current scope. Local Compose credentials are development-only.
 - The initial load must cover all five slots in one request. No endpoint pre-creates empty slots; configuration creates each physical slot once, protected by the ATM/slot uniqueness constraint.

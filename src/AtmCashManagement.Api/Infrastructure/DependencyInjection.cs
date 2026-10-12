@@ -21,6 +21,7 @@ public static class DependencyInjection
         services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("database");
         services.AddScoped<AtmManagementService>();
         services.AddSingleton<INoteSelectionService, NoteSelectionService>();
+        services.AddSingleton<DepositAllocationPlanner>();
 
         return services;
     }

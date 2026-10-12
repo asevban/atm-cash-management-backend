@@ -55,6 +55,143 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDeposit", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("UnrecognizedNoteCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtmId", "OccurredAt");
+
+                    b.ToTable("cash_deposits", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cash_deposits_unrecognized_count", "\"UnrecognizedNoteCount\" >= 0");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDepositNote", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AcceptedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("CashDepositId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("Denomination")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("InsertedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ReturnedCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CashDepositId", "Currency", "Denomination")
+                        .IsUnique();
+
+                    b.ToTable("cash_deposit_notes", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cash_deposit_notes_counts", "\"AcceptedCount\" >= 0 AND \"ReturnedCount\" >= 0 AND \"InsertedCount\" = \"AcceptedCount\" + \"ReturnedCount\"");
+
+                            t.HasCheckConstraint("ck_cash_deposit_notes_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_cash_deposit_notes_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
+
+                            t.HasCheckConstraint("ck_cash_deposit_notes_inserted_count", "\"InsertedCount\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtmId", "OccurredAt");
+
+                    b.ToTable("cash_reconciliations", (string)null);
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliationLine", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CashReconciliationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CassetteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("CountedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("Denomination")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("DifferenceCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ExpectedCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CassetteId");
+
+                    b.HasIndex("CashReconciliationId", "CassetteId", "Currency", "Denomination")
+                        .IsUnique();
+
+                    b.ToTable("cash_reconciliation_lines", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cash_reconciliation_lines_counted", "\"CountedCount\" BETWEEN 0 AND 100");
+
+                            t.HasCheckConstraint("ck_cash_reconciliation_lines_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_cash_reconciliation_lines_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
+
+                            t.HasCheckConstraint("ck_cash_reconciliation_lines_difference", "\"DifferenceCount\" = \"CountedCount\" - \"ExpectedCount\"");
+
+                            t.HasCheckConstraint("ck_cash_reconciliation_lines_expected", "\"ExpectedCount\" BETWEEN 0 AND 100");
+                        });
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>
                 {
                     b.Property<Guid>("Id")
@@ -209,6 +346,54 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDeposit", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", null)
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDepositNote", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.CashDeposit", "CashDeposit")
+                        .WithMany("Notes")
+                        .HasForeignKey("CashDepositId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CashDeposit");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliation", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", null)
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliationLine", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.CashReconciliation", "CashReconciliation")
+                        .WithMany("Lines")
+                        .HasForeignKey("CashReconciliationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Cassette", "Cassette")
+                        .WithMany()
+                        .HasForeignKey("CassetteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("CashReconciliation");
+
+                    b.Navigation("Cassette");
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>
                 {
                     b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
@@ -253,6 +438,16 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Atm", b =>
                 {
                     b.Navigation("Cassettes");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashDeposit", b =>
+                {
+                    b.Navigation("Notes");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliation", b =>
+                {
+                    b.Navigation("Lines");
                 });
 
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>

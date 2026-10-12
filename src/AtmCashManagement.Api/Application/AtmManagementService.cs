@@ -9,7 +9,7 @@ using Npgsql;
 
 namespace AtmCashManagement.Api.Application;
 
-public sealed class AtmManagementService(AtmDbContext db)
+public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlanner depositAllocationPlanner)
 {
     public async Task<AtmResponse> CreateAtmAsync(CreateAtmRequest request, CancellationToken cancellationToken)
     {
@@ -308,6 +308,347 @@ public sealed class AtmManagementService(AtmDbContext db)
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return ToAtmResponse(atm);
+    }
+
+    public async Task<CashDepositResponse> DepositAsync(
+        Guid id,
+        CashDepositRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            throw AtmApiException.Validation("deposit_request_required", "A deposit request is required.");
+        }
+
+        if (request.UnrecognizedNoteCount < 0)
+        {
+            throw AtmApiException.Validation("unrecognized_note_count_invalid", "Unrecognized note count cannot be negative.");
+        }
+
+        var notes = request.Notes;
+        if (notes is null || notes.Any(note => note is null))
+        {
+            throw AtmApiException.Validation("deposit_notes_required", "Deposit notes must be supplied as an array.");
+        }
+
+        if (notes.GroupBy(note => (note.Currency, note.Denomination)).Any(group => group.Count() > 1))
+        {
+            throw AtmApiException.Validation("duplicate_note_type", "A deposit may include each currency and denomination only once.");
+        }
+
+        foreach (var note in notes)
+        {
+            if (!Enum.IsDefined(note.Currency) || !Enum.IsDefined(note.Denomination))
+            {
+                throw AtmApiException.Validation("note_type_invalid", "Only TRY, USD, EUR and denominations 20, 50, 100, 500 are supported.");
+            }
+
+            if (note.Count < 0)
+            {
+                throw AtmApiException.Validation("note_count_invalid", "Deposited note counts cannot be negative.");
+            }
+        }
+
+        if (request.UnrecognizedNoteCount == 0 && notes.Sum(note => (long)note.Count) == 0)
+        {
+            throw AtmApiException.Validation("deposit_empty", "A deposit must contain at least one recognized or unrecognized note.");
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var atm = await LockAtmAsync(id, cancellationToken);
+        if (atm is null)
+        {
+            throw AtmApiException.NotFound(id);
+        }
+
+        if (!AtmLifecycleRules.CanPerformCustomerCashOperation(atm.State))
+        {
+            throw AtmApiException.Conflict("invalid_atm_state", $"Deposits are not allowed while the ATM is {atm.State}.");
+        }
+
+        await db.Entry(atm).Collection(item => item.Cassettes)
+            .Query().Include(cassette => cassette.Balances).LoadAsync(cancellationToken);
+        CassetteConfigurationValidator.ValidateStored(atm.Cassettes.ToArray());
+
+        var cassettes = atm.Cassettes.OrderBy(cassette => cassette.Number).ToArray();
+        var cassettesByNumber = cassettes.ToDictionary(cassette => cassette.Number);
+        var plan = depositAllocationPlanner.Plan(
+            cassettes.Select(cassette => new CassetteCapacitySnapshot(
+                cassette.Number,
+                cassette.Type,
+                cassette.Capacity,
+                cassette.Currency,
+                cassette.Denomination,
+                cassette.Balances.Sum(balance => balance.PhysicalCount))).ToArray(),
+            notes);
+
+        var occurredAt = DateTimeOffset.UtcNow;
+        var cashDeposit = new CashDeposit(atm.Id, occurredAt, request.UnrecognizedNoteCount);
+        foreach (var note in notes.Where(note => note.Count > 0))
+        {
+            var acceptedCount = plan.Placements
+                .Where(placement => placement.Currency == note.Currency && placement.Denomination == note.Denomination)
+                .Sum(placement => placement.Count);
+            var returnedCount = plan.CapacityReturns
+                .Where(returned => returned.Currency == note.Currency && returned.Denomination == note.Denomination)
+                .Sum(returned => returned.Count);
+            cashDeposit.AddNote(new CashDepositNote(
+                cashDeposit.Id,
+                note.Currency,
+                note.Denomination,
+                note.Count,
+                acceptedCount,
+                returnedCount));
+        }
+
+        foreach (var placement in plan.Placements)
+        {
+            var cassette = cassettesByNumber[placement.CassetteNumber];
+            var balance = cassette.Balances.SingleOrDefault(item =>
+                item.Currency == placement.Currency && item.Denomination == placement.Denomination);
+            if (balance is null)
+            {
+                balance = new CassetteBalance(
+                    cassette.Id,
+                    placement.Currency,
+                    placement.Denomination,
+                    physicalCount: placement.Count);
+                db.CassetteBalances.Add(balance);
+            }
+            else
+            {
+                balance.AddPhysicalNotes(placement.Count);
+            }
+
+            db.CassetteMovements.Add(new CassetteMovement(
+                atm.Id,
+                cassette.Id,
+                CassetteMovementType.Deposit,
+                placement.Currency,
+                placement.Denomination,
+                physicalCountDelta: placement.Count,
+                reservedCountDelta: 0,
+                occurredAt,
+                cashDeposit.Id.ToString("N")));
+        }
+
+        db.CashDeposits.Add(cashDeposit);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+
+        var acceptedNotes = plan.Placements
+            .GroupBy(placement => (placement.Currency, placement.Denomination))
+            .Select(group => new DepositAcceptedNoteResponse(group.Key.Currency, group.Key.Denomination, group.Sum(placement => placement.Count)))
+            .OrderBy(note => note.Currency)
+            .ThenBy(note => note.Denomination)
+            .ToArray();
+        var acceptedValues = Enum.GetValues<Currency>()
+            .Select(currency => new CurrencyBalanceResponse(
+                currency,
+                plan.Placements.Where(placement => placement.Currency == currency)
+                    .Sum(placement => (long)placement.Count * (int)placement.Denomination)))
+            .ToArray();
+
+        return new CashDepositResponse(
+            cashDeposit.Id,
+            atm.Id,
+            occurredAt,
+            acceptedNotes,
+            plan.Placements,
+            plan.CapacityReturns,
+            request.UnrecognizedNoteCount,
+            acceptedValues);
+    }
+
+    public async Task<CashReconciliationResponse> ReconcileAsync(
+        Guid id,
+        CashReconciliationRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || request.Cassettes is null || request.Cassettes.Count != 5)
+        {
+            throw AtmApiException.Validation("reconciliation_snapshot_incomplete", "A reconciliation snapshot must include all five cassette slots.");
+        }
+
+        if (request.Cassettes.Any(cassette => cassette is null || cassette.Notes is null))
+        {
+            throw AtmApiException.Validation("reconciliation_snapshot_invalid", "Each cassette snapshot must include a notes array.");
+        }
+
+        if (request.Cassettes.Any(cassette => cassette.CassetteNumber is < 1 or > 5) ||
+            request.Cassettes.Select(cassette => cassette.CassetteNumber).Distinct().Count() != 5 ||
+            request.Cassettes.Select(cassette => cassette.CassetteNumber).Order().Where((number, index) => number != index + 1).Any())
+        {
+            throw AtmApiException.Validation("reconciliation_snapshot_incomplete", "Snapshot cassette numbers must uniquely cover slots 1 through 5.");
+        }
+
+        foreach (var cassette in request.Cassettes)
+        {
+            var notes = cassette.Notes!;
+            if (notes.Any(note => note is null))
+            {
+                throw AtmApiException.Validation("reconciliation_note_invalid", $"Cassette {cassette.CassetteNumber} contains a null note entry.");
+            }
+
+            if (notes.GroupBy(note => (note.Currency, note.Denomination)).Any(group => group.Count() > 1))
+            {
+                throw AtmApiException.Validation("duplicate_note_type", $"Cassette {cassette.CassetteNumber} has duplicate count lines.");
+            }
+
+            foreach (var note in notes)
+            {
+                if (!Enum.IsDefined(note.Currency) || !Enum.IsDefined(note.Denomination))
+                {
+                    throw AtmApiException.Validation("note_type_invalid", "Only TRY, USD, EUR and denominations 20, 50, 100, 500 are supported.");
+                }
+
+                if (note.Count < 0)
+                {
+                    throw AtmApiException.Validation("note_count_invalid", "Physical note counts cannot be negative.");
+                }
+            }
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var atm = await LockAtmAsync(id, cancellationToken);
+        if (atm is null)
+        {
+            throw AtmApiException.NotFound(id);
+        }
+
+        if (!AtmLifecycleRules.CanReconcile(atm.State))
+        {
+            throw AtmApiException.Conflict("invalid_atm_state", $"Reconciliation is only allowed in MAINTENANCE, not {atm.State}.");
+        }
+
+        await db.Entry(atm).Collection(item => item.Cassettes)
+            .Query().Include(cassette => cassette.Balances).LoadAsync(cancellationToken);
+        CassetteConfigurationValidator.ValidateStored(atm.Cassettes.ToArray());
+        var cassettes = atm.Cassettes.OrderBy(cassette => cassette.Number).ToArray();
+        var snapshotsByNumber = request.Cassettes.ToDictionary(cassette => cassette.CassetteNumber);
+
+        if (cassettes.Any(cassette => cassette.Balances.Any(balance => balance.ReservedCount > 0)))
+        {
+            throw AtmApiException.Conflict(
+                "reconciliation_active_reservations",
+                "Reconciliation is blocked while any cassette has reserved notes; release or resolve those reservations first.");
+        }
+
+        foreach (var cassette in cassettes)
+        {
+            var countedNotes = snapshotsByNumber[cassette.Number].Notes!;
+            if (cassette.Type == CassetteType.Recycling && countedNotes.Any(note =>
+                    note.Currency != cassette.Currency || note.Denomination != cassette.Denomination))
+            {
+                throw AtmApiException.Validation(
+                    "recycling_note_mismatch",
+                    $"Recycling cassette {cassette.Number} can contain only {cassette.Currency} {cassette.Denomination} banknotes.");
+            }
+
+            if (countedNotes.Sum(note => (long)note.Count) > cassette.Capacity)
+            {
+                throw AtmApiException.Validation(
+                    "cassette_capacity_exceeded",
+                    $"The physical count for cassette {cassette.Number} exceeds its capacity of {cassette.Capacity} notes.");
+            }
+        }
+
+        var occurredAt = DateTimeOffset.UtcNow;
+        var reconciliation = new CashReconciliation(atm.Id, occurredAt);
+        var responseByCassette = new List<ReconciliationCassetteResult>();
+        var changedCassettes = new List<ReconciliationCassetteChange>();
+        var differenceValues = Enum.GetValues<Currency>().ToDictionary(currency => currency, _ => 0L);
+
+        foreach (var cassette in cassettes)
+        {
+            var countedByType = snapshotsByNumber[cassette.Number].Notes!
+                .ToDictionary(note => (note.Currency, note.Denomination), note => note.Count);
+            var existingByType = cassette.Balances.ToDictionary(balance => (balance.Currency, balance.Denomination));
+            var noteTypes = existingByType.Keys.Concat(countedByType.Keys).Distinct().ToList();
+            if (cassette.Type == CassetteType.Recycling)
+            {
+                noteTypes.Add((cassette.Currency!.Value, cassette.Denomination!.Value));
+            }
+
+            var noteResults = new List<ReconciliationNoteResult>();
+            foreach (var noteType in noteTypes.Distinct().OrderBy(note => note.Currency).ThenBy(note => note.Denomination))
+            {
+                existingByType.TryGetValue(noteType, out var existingBalance);
+                var expectedCount = existingBalance?.PhysicalCount ?? 0;
+                var countedCount = countedByType.GetValueOrDefault(noteType);
+                var differenceCount = countedCount - expectedCount;
+                var line = new CashReconciliationLine(
+                    reconciliation.Id,
+                    cassette.Id,
+                    noteType.Currency,
+                    noteType.Denomination,
+                    expectedCount,
+                    countedCount);
+                reconciliation.AddLine(line);
+                noteResults.Add(new ReconciliationNoteResult(
+                    noteType.Currency,
+                    noteType.Denomination,
+                    expectedCount,
+                    countedCount,
+                    differenceCount));
+                differenceValues[noteType.Currency] += (long)differenceCount * (int)noteType.Denomination;
+
+                if (differenceCount == 0)
+                {
+                    continue;
+                }
+
+                if (existingBalance is null)
+                {
+                    existingBalance = new CassetteBalance(
+                        cassette.Id,
+                        noteType.Currency,
+                        noteType.Denomination,
+                        physicalCount: countedCount);
+                    db.CassetteBalances.Add(existingBalance);
+                }
+                else
+                {
+                    existingBalance.ReconcilePhysicalCount(countedCount);
+                }
+
+                db.CassetteMovements.Add(new CassetteMovement(
+                    atm.Id,
+                    cassette.Id,
+                    CassetteMovementType.ReconciliationAdjustment,
+                    noteType.Currency,
+                    noteType.Denomination,
+                    physicalCountDelta: differenceCount,
+                    reservedCountDelta: 0,
+                    occurredAt,
+                    reconciliation.Id.ToString("N")));
+            }
+
+            responseByCassette.Add(new ReconciliationCassetteResult(
+                cassette.Number,
+                noteResults.OrderBy(note => note.Currency).ThenBy(note => note.Denomination).ToArray()));
+
+            var cassetteChanges = noteResults.Where(note => note.DifferenceCount != 0).ToArray();
+            if (cassetteChanges.Length > 0)
+            {
+                changedCassettes.Add(new ReconciliationCassetteChange(
+                    cassette.Number,
+                    cassetteChanges.Length,
+                    cassetteChanges.Sum(note => note.DifferenceCount)));
+            }
+        }
+
+        db.CashReconciliations.Add(reconciliation);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+
+        return new CashReconciliationResponse(
+            reconciliation.Id,
+            atm.Id,
+            occurredAt,
+            responseByCassette,
+            differenceValues.Select(pair => new CurrencyDifferenceResponse(pair.Key, pair.Value)).ToArray(),
+            changedCassettes);
     }
 
     public async Task<AtmResponse> SetStateAsync(
