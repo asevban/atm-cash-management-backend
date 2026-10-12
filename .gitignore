@@ -1,0 +1,21 @@
+# Build output
+**/bin/
+**/obj/
+**/out/
+**/TestResults/
+
+# IDE and local tooling
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+.config/dotnet-tools.json.user
+
+# Local secrets and environment files
+.env
+secrets/
+
+# OS files
+Thumbs.db
+Desktop.ini
