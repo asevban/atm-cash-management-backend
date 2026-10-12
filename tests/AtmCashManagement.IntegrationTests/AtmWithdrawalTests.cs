@@ -308,7 +308,7 @@ public sealed class AtmWithdrawalTests(AtmApiFixture fixture) : IClassFixture<At
     }
 
     [Fact]
-    public async Task Quote_expiry_stops_at_istanbul_midnight_and_next_day_gets_a_fresh_limit()
+    public async Task Quote_expires_exactly_sixty_seconds_after_creation_across_istanbul_midnight()
     {
         var atmId = await CreateAtmAsync(InitialNotes((2, [new(Currency.TRY, BanknoteDenomination.OneHundred, 2)])));
         fixture.Clock.SetUtcNow(new DateTimeOffset(2026, 10, 12, 20, 59, 30, TimeSpan.Zero));
@@ -316,18 +316,57 @@ public sealed class AtmWithdrawalTests(AtmApiFixture fixture) : IClassFixture<At
         using var response = await PostQuoteAsync(atmId, CardOne, Currency.TRY, 100);
         using var result = await ParseAsync(response);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var createdAt = fixture.Clock.UtcNow;
         var expiry = result.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset();
-        Assert.Equal(TimeSpan.FromSeconds(30), expiry - fixture.Clock.UtcNow);
-        fixture.Clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.Equal(createdAt.AddSeconds(60), expiry);
+        Assert.Equal(new DateTimeOffset(2026, 10, 13, 0, 0, 30, TimeSpan.FromHours(3)),
+            TimeZoneInfo.ConvertTime(expiry, TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul")));
+
+        var quoteId = result.RootElement.GetProperty("quoteId").GetGuid();
+        fixture.Clock.Advance(TimeSpan.FromSeconds(59));
+        Assert.Equal(WithdrawalQuoteStatus.Active, (await GetQuoteAsync(quoteId)).Status);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(1));
         using (var scope = fixture.Services.CreateAsyncScope())
         {
             await scope.ServiceProvider.GetRequiredService<WithdrawalQuoteService>().ExpireDueQuotesAsync(CancellationToken.None);
         }
 
-        var firstQuoteId = result.RootElement.GetProperty("quoteId").GetGuid();
-        Assert.Equal(WithdrawalQuoteStatus.Expired, (await GetQuoteAsync(firstQuoteId)).Status);
-        using var nextDay = await PostQuoteAsync(atmId, CardOne, Currency.TRY, 100);
-        Assert.Equal(HttpStatusCode.OK, nextDay.StatusCode);
+        Assert.Equal(WithdrawalQuoteStatus.Expired, (await GetQuoteAsync(quoteId)).Status);
+        Assert.Equal(0, (await GetDailyUsageAsync(CardOne, Currency.TRY, new DateOnly(2026, 10, 12))).ReservedAmount);
+    }
+
+    [Fact]
+    public async Task Crossing_midnight_confirm_uses_quote_business_date_and_new_quote_uses_next_day_limit()
+    {
+        var configuration = Configuration(
+            slot2Denomination: BanknoteDenomination.FiveHundred,
+            slot5Currency: Currency.TRY,
+            slot5Denomination: BanknoteDenomination.FiveHundred);
+        var atmId = await CreateAtmAsync(InitialNotes(
+            (2, [new(Currency.TRY, BanknoteDenomination.FiveHundred, 40)]),
+            (5, [new(Currency.TRY, BanknoteDenomination.FiveHundred, 40)])), configuration);
+        fixture.Clock.SetUtcNow(new DateTimeOffset(2026, 10, 12, 20, 59, 30, TimeSpan.Zero));
+
+        using var beforeMidnight = await CreateQuoteDocumentAsync(atmId, CardOne, Currency.TRY, 20_000);
+        var oldQuoteId = beforeMidnight.RootElement.GetProperty("quoteId").GetGuid();
+        var oldOptionId = beforeMidnight.RootElement.GetProperty("options")[0].GetProperty("optionId").GetGuid();
+        Assert.Equal(20_000, (await GetDailyUsageAsync(CardOne, Currency.TRY, new DateOnly(2026, 10, 12))).ReservedAmount);
+
+        fixture.Clock.Advance(TimeSpan.FromSeconds(45));
+        using var afterMidnight = await PostQuoteAsync(atmId, CardOne, Currency.TRY, 500);
+        using var nextDayResult = await ParseAsync(afterMidnight);
+        Assert.Equal(HttpStatusCode.OK, afterMidnight.StatusCode);
+        var newQuoteId = nextDayResult.RootElement.GetProperty("quoteId").GetGuid();
+        Assert.Equal(new DateOnly(2026, 10, 13), (await GetQuoteAsync(newQuoteId)).LimitBusinessDate);
+        Assert.Equal(500, (await GetDailyUsageAsync(CardOne, Currency.TRY, new DateOnly(2026, 10, 13))).ReservedAmount);
+
+        using var confirmed = await PostConfirmAsync(oldQuoteId, oldOptionId, "midnight-confirm-key");
+        Assert.Equal(HttpStatusCode.OK, confirmed.StatusCode);
+        var previousDayUsage = await GetDailyUsageAsync(CardOne, Currency.TRY, new DateOnly(2026, 10, 12));
+        Assert.Equal(20_000, previousDayUsage.ConfirmedAmount);
+        Assert.Equal(0, previousDayUsage.ReservedAmount);
+        Assert.Equal(500, (await GetDailyUsageAsync(CardOne, Currency.TRY, new DateOnly(2026, 10, 13))).ReservedAmount);
+        Assert.Equal(WithdrawalQuoteStatus.Confirmed, (await GetQuoteAsync(oldQuoteId)).Status);
     }
 
     [Fact]
@@ -714,10 +753,10 @@ public sealed class AtmWithdrawalTests(AtmApiFixture fixture) : IClassFixture<At
             .Where(reservation => reservation.QuoteId == quoteId).OrderBy(reservation => reservation.Cassette.Number).ToListAsync();
     }
 
-    private async Task<CardDailyLimitUsage> GetDailyUsageAsync(string cardNumber, Currency currency)
+    private async Task<CardDailyLimitUsage> GetDailyUsageAsync(string cardNumber, Currency currency, DateOnly? requestedBusinessDate = null)
     {
         var identifier = fixture.Services.GetRequiredService<CardIdentifierService>().CreateIdentifier(cardNumber);
-        var businessDate = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(
+        var businessDate = requestedBusinessDate ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(
             fixture.Clock.UtcNow,
             TimeZoneInfo.FindSystemTimeZoneById("Europe/Istanbul")).DateTime);
         await using var scope = fixture.Services.CreateAsyncScope();

@@ -297,7 +297,7 @@ public sealed class WithdrawalQuoteService(
             throw AtmApiException.Conflict("withdrawal_quote_not_active", $"A quote in {quote.Status} state cannot be confirmed.");
         }
 
-        if (now >= quote.ExpiresAtUtc || GetBusinessDate(now) != quote.LimitBusinessDate)
+        if (now >= quote.ExpiresAtUtc)
         {
             await LoadCassettesAndBalancesAsync(atm, cancellationToken);
             var cassetteMap = atm.Cassettes.ToDictionary(cassette => cassette.Id);
@@ -443,7 +443,7 @@ public sealed class WithdrawalQuoteService(
         var now = UtcNow();
         await LoadCassettesAndBalancesAsync(atm, cancellationToken);
         var cassetteMap = atm.Cassettes.ToDictionary(cassette => cassette.Id);
-        var expired = now >= quote.ExpiresAtUtc || GetBusinessDate(now) != quote.LimitBusinessDate;
+        var expired = now >= quote.ExpiresAtUtc;
         await ReleaseQuoteReservationsAsync(quote, usage, cassetteMap, now, quote.Id.ToString("N"), cancellationToken);
         if (expired)
         {
@@ -715,15 +715,7 @@ public sealed class WithdrawalQuoteService(
     private static DateOnly GetBusinessDate(DateTimeOffset utcNow) =>
         DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(utcNow, IstanbulTimeZone).DateTime);
 
-    private static DateTimeOffset GetExpiry(DateTimeOffset now)
-    {
-        var localDate = GetBusinessDate(now);
-        var nextLocalMidnight = localDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
-        var nextMidnightUtc = TimeZoneInfo.ConvertTimeToUtc(nextLocalMidnight, IstanbulTimeZone);
-        var localDayEnd = new DateTimeOffset(nextMidnightUtc, TimeSpan.Zero);
-        var sixtySeconds = now.AddSeconds(60);
-        return localDayEnd < sixtySeconds ? localDayEnd : sixtySeconds;
-    }
+    private static DateTimeOffset GetExpiry(DateTimeOffset now) => now.AddSeconds(60);
 
     private static TimeZoneInfo GetIstanbulTimeZone()
     {

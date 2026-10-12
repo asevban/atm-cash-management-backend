@@ -86,7 +86,7 @@ dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 
 The suite includes all eight B3 acceptance cases, setup/lifecycle and deposit routing rules, real-PostgreSQL quote/reservation/idempotency/expiration/daily-limit flows, independent connection concurrency races, ledger reconstruction, four-eyes reconciliation, and B10 report/outbox behavior. It does not use mocks as evidence for PostgreSQL locking.
 
-Final audit run on 2026-10-12: 78 unit tests and 73 PostgreSQL integration tests passed (151 total). The integration run used the separate clean Compose database on host port 25432 and removed only its own temporary test schemas.
+Final hotfix verification on 2026-10-12: 78 unit tests and 74 PostgreSQL integration tests passed (152 total). The integration run used the separate Compose database on host port 35432 and removed only its own temporary test schemas.
 
 The final audit's exact build, test, clean Compose, and Newman results are recorded in `docs/REQUIREMENTS_CHECKLIST.md`.
 
@@ -119,7 +119,7 @@ Differences whose sum of absolute TRY values is greater than TRY 1,000 wait for 
 
 Quote creation offers exact or payable lower/upper options. A reservation is created atomically with the quote and its `RESERVATION` movements. If two alternatives are shown, each cassette/currency/denomination reservation is the maximum allocation required by either option, so overlapping notes are reserved once. The option allocations remain separate. Confirm consumes the selected allocation and emits `WITHDRAWAL`; unused reserved notes are released with `RESERVATION_RELEASE`. Cancel and expiration release the complete reservation. Quotes expire after 60 seconds using stored UTC timestamps and a hosted cleanup worker; API operations also check expiry while holding PostgreSQL locks.
 
-Limits are shared across ATMs per keyed card identifier, currency, and Europe/Istanbul business date: TRY 20,000, USD 1,000, EUR 1,000. Confirmed withdrawals plus the maximum offered active-quote option count toward the limit; alternatives are not added together. Confirmation transfers reserved usage to confirmed usage in one transaction.
+Limits are shared across ATMs per keyed card identifier, currency, and Europe/Istanbul business date: TRY 20,000, USD 1,000, EUR 1,000. Confirmed withdrawals plus the maximum offered active-quote option count toward the limit; alternatives are not added together. A quote's limit reservation remains attached to the Istanbul business date on which the quote was created, including when its 60-second validity crosses midnight. Confirmation transfers reserved usage to confirmed usage in that same business-date row in one transaction; a new quote after midnight uses the new day's limit row.
 
 The raw card number is not stored or logged. `CardIdentifierService` computes an HMAC-SHA256 identifier using `CardSecurity:CardNumberHmacKey`, configured through environment/secret configuration and requiring at least 32 UTF-8 bytes. The repository's Compose fallback is only for local development.
 
@@ -143,7 +143,7 @@ When a recycling cassette crosses down from at least 10% available stock to belo
 
 - The first successful load explicitly covers all five slots in one request, contains at least one banknote in total, and records empty slots with empty note arrays. This defines when initial loading is complete.
 - Physical reconciliation is a full snapshot of all five cassettes and runs only in maintenance. Existing reservations block reconciliation.
-- The business day is the Europe/Istanbul calendar day. A quote's expiry is capped at that day's local midnight; a new quote is required after the day changes.
+- The business day for a quote's daily-limit reservation is its creation date in Europe/Istanbul. A quote remains valid for exactly 60 seconds from creation, including across local midnight. Confirm, cancel, and expiration settle or release the original business-date reservation; a new quote after midnight uses the new business day's limit.
 - Alternatives share one reservation: for each cassette and note type the quote reserves the maximum amount required by either offered option, not the sum. Each option retains its own allocation.
 - A reconciliation above the approval threshold uses the sum of absolute TRY-converted note differences, so shortages and surpluses do not net against each other. Approval is required only when the amount is greater than TRY 1,000.
 - If an exact withdrawal is impossible, both lower and upper options are offered only when stock and daily limit make them payable.
