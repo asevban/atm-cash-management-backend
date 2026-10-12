@@ -22,11 +22,16 @@ public static class DependencyInjection
         services.AddScoped<AtmManagementService>();
         services.AddScoped<CassetteLedgerConsistencyService>();
         services.AddScoped<WithdrawalQuoteService>();
+        services.AddScoped<LowCashEventRecorder>();
+        services.AddScoped<OutboxEventProcessor>();
+        services.AddScoped<OperationsReportService>();
         services.AddSingleton<INoteSelectionService, NoteSelectionService>();
         services.AddSingleton<DepositAllocationPlanner>();
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<CardIdentifierService>();
+        services.AddSingleton<IOutboxEventPublisher, LoggingOutboxEventPublisher>();
         services.AddHostedService<QuoteExpirationBackgroundService>();
+        services.AddHostedService<OutboxBackgroundService>();
 
         return services;
     }

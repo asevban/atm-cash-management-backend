@@ -167,6 +167,7 @@ The schema contains:
 - `ExchangeRate`: decimal currency-to-TRY rates used by new reconciliations; each reconciliation retains its own immutable rate and threshold snapshot.
 - `WithdrawalQuote`, `WithdrawalQuoteOption`, `WithdrawalQuoteOptionAllocation`, and `QuoteReservation`: expiring quote state, individual selectable plans, and the combined cassette-level reservation.
 - `CashWithdrawal`, `CardDailyLimitUsage`, and `ConfirmIdempotencyRecord`: confirmed withdrawal facts, card/currency/day limit usage, and durable successful confirm replay results. Card identifiers are HMAC-SHA256 values.
+- `OutboxEvent`: durable low-cash events with a unique source key, JSON payload, pending/sent state, sent time, and retry count.
 
 The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. Withdrawal quote creation writes `RESERVATION`; confirmation writes `WITHDRAWAL` for physical and reserved counts consumed and `RESERVATION_RELEASE` for unused reserved notes. Cancellation and expiration write `RESERVATION_RELEASE`. References point to the quote or withdrawal transaction. This phase does not add an unload operation endpoint.
 
@@ -189,6 +190,18 @@ Quote confirmation reduces physical and reserved counts together for dispensed n
 
 EF Core rejects updates and deletes of tracked `CassetteMovement` rows. There is no database trigger preventing a privileged direct SQL client from modifying the ledger; database administrators remain able to bypass the application-level append-only guard.
 
+### Operations reporting and low-cash outbox (B10)
+
+`GET /api/reports/operations` returns every ATM, its cassette slots and balances, currency totals, and the network physical cash total in TRY. `?atmId={guid}` limits the report to one ATM. Each cassette balance reports physical, reserved, and available counts and face values; duplicate denominations in different cassettes remain separate. Deposit-only cassettes can contain multiple currencies and denominations. Their physical value is included in totals, while `withdrawalEligible` is false and `withdrawableAvailableValue` includes only recycling-cassette stock. The endpoint reads ATM/balance data and rates from one PostgreSQL repeatable-read snapshot and does not mutate data.
+
+The existing `ExchangeRate` table supplies TRY-to-TRY (1), USD-to-TRY (35), and EUR-to-TRY (38) seed rates. The report computes `face value × note count × rate` with decimal arithmetic. These seeded rates are examples for the assignment and are not current market quotes. Missing or invalid required rates produce a `503 operations_report_exchange_rate_unavailable` ProblemDetails response instead of a partial or incorrect total.
+
+A low-cash event is created only for a `RECYCLING` cassette when `PreviousAvailable × 10 >= Capacity` and `CurrentAvailable × 10 < Capacity`. With the current capacity of 100, available 10 is not low and a transition to 9 creates an alert. This threshold-transition interpretation avoids repeated alerts during one low-balance period; restoring the balance to the threshold or above allows a later downward crossing to create a new event. Deposit-only cassettes never produce low-cash events.
+
+The quote reservation, load, deposit, withdrawal, reservation release, and reconciliation mutation paths check the transition. The `OutboxEvent` entity is added to the same EF Core unit of work as its balance and movement changes, and the caller's existing PostgreSQL transaction commits or rolls back all of them together. A unique event key prevents duplicate insertion for the same source transaction and cassette/note type. Idempotent withdrawal-confirm replays do not re-run balance changes or create another event.
+
+`OutboxBackgroundService` periodically calls the separately testable `OutboxEventProcessor`. It claims pending rows inside a database transaction with `FOR UPDATE SKIP LOCKED`, logs each event through `ILogger`, and marks successful logs `SENT` with `SentAtUtc`. A processing exception increments `RetryCount` while leaving the row pending for a later poll. Pending records are durable across process restarts. Delivery is at-least-once: a crash after logging but before the database commit can cause the same event to be logged again. This phase logs alerts only; it does not deliver notifications to an external system. Polling defaults to every five seconds and can be changed with `Outbox:PollIntervalSeconds`.
+
 ## Data integrity and transaction decisions
 
 - The database constrains slot numbers to 1 through 5 and has a unique `(AtmId, Number)` index. Together these ensure an ATM cannot have more than five slots or duplicate a physical slot. The application requires exactly five distinct slots, one deposit-only and four recycling cassettes, before saving configuration. This exact-count check is not implemented as a row `CHECK` constraint because such a constraint cannot count related cassette rows.
@@ -210,18 +223,18 @@ dotnet restore AtmCashManagement.sln
 dotnet build AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The xUnit suite includes domain-rule, note-selection, and deposit-routing unit tests, plus HTTP integration tests against a real PostgreSQL database. Each integration fixture creates an isolated temporary schema and removes only that schema after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated PostgreSQL test database before running:
+The xUnit suite includes domain-rule, note-selection, deposit-routing, low-cash threshold unit tests, plus HTTP integration tests against a real PostgreSQL database. Each integration fixture creates an isolated temporary schema and removes only that schema after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated PostgreSQL test database before running:
 
 ```powershell
 $env:ATM_TEST_CONNECTION_STRING = "Host=localhost;Port=5432;Database=atm_cash_test;Username=atm_app;Password=dev-only-change-me;GSS Encryption Mode=Disable"
 dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The unit tests include the B3 acceptance scenarios, deposit routing cases, and B9 decimal/absolute difference calculations and exchange-rate validation. PostgreSQL integration tests cover exact and alternative quotes, union reservations, release/consumption, idempotency, expiration, all currency limits, HMAC storage, ATM state validation, movement rows, B6 concurrency, and B9 threshold, two-person approval, rate snapshots, missing users/rates, and repeated concurrent approvals. The independent `AtmPostgreSqlConcurrencyTests` class starts HTTP operations behind a shared task barrier; each request is handled by its own scoped `DbContext` and PostgreSQL transaction. `CassetteLedgerConsistencyTests` verifies ledger reconstruction through load, deposit, reservation, release, withdrawal, expiration, reconciliation, empty cassettes, mixed deposit-only note types, immutable event keys, and a deliberately corrupted balance in the fixture's isolated schema.
+The unit tests include the B3 acceptance scenarios, deposit routing cases, B9 decimal/absolute difference calculations and exchange-rate validation, and strict low-cash threshold crossings. PostgreSQL integration tests cover exact and alternative quotes, union reservations, release/consumption, idempotency, expiration, all currency limits, HMAC storage, ATM state validation, movement rows, B6 concurrency, B9 approval/rate snapshots, and B10 mixed-currency reports, reserve-triggered alerts, rollback atomicity, retry counts, SENT processing, and concurrent outbox workers. The independent `AtmPostgreSqlConcurrencyTests` class starts HTTP operations behind a shared task barrier; each request is handled by its own scoped `DbContext` and PostgreSQL transaction. `CassetteLedgerConsistencyTests` verifies ledger reconstruction through load, deposit, reservation, release, withdrawal, expiration, reconciliation, empty cassettes, mixed deposit-only note types, immutable event keys, and a deliberately corrupted balance in the fixture's isolated schema.
 
 ## EF Core migrations
 
-`20261012102224_AddReconciliationApprovalWorkflow` adds the B9 approval fields and pending-approval index, plus the decimal `exchange_rates` table and demo TRY conversion rates. Existing reconciliation rows are backfilled as completed with creator `legacy-unknown`; historical rate snapshots and absolute TRY totals remain null because they were not captured before this migration. The API applies pending migrations at startup.
+`20261012102224_AddReconciliationApprovalWorkflow` adds the B9 approval fields and pending-approval index, plus the decimal `exchange_rates` table and demo TRY conversion rates. `AddOperationsReportAndOutbox` adds the durable B10 outbox table and its event-key, status/time, and foreign-key constraints. The API applies pending migrations at startup.
 
 ```powershell
 dotnet tool restore
@@ -236,8 +249,8 @@ dotnet ef migrations add MigrationName --project src/AtmCashManagement.Api --sta
 
 ## Unfinished items and limitations
 
-- Phase 6.1 was validated on Windows where `docker.exe` was not available on `PATH` or in the standard Docker Desktop CLI path. The installed standalone Compose plugin (`docker-compose.exe` v5.5.1) was used against Docker Engine 29.8.2: the API image was rebuilt, the existing PostgreSQL container and volume were retained, the Phase 6 migration was applied to the existing `atm_cash` database, and health plus HTTP quote/confirm/ledger-consistency checks passed. The `docker version` CLI command itself could not be run.
-- B9 four-eyes/X-User approval and TRY 1,000 threshold, and B10 general TRY conversion and advanced operational reports/alerts/outbox are not implemented. Authentication and authorization remain out of scope.
+- On Windows, `docker.exe` is not available on `PATH` or in the standard Docker Desktop CLI path. The standalone Compose plugin (`docker-compose.exe` v5.5.1) was used against Docker Engine 29.8.2. Phase 6.1 and Phase 8 API images were rebuilt while retaining the PostgreSQL container and volume. The Phase 8 migration was applied to the existing `atm_cash` database without changing its pre-existing ATM, movement, or withdrawal row counts. Health, HTTP operations report, quote reservation/outbox PENDING-to-SENT processing, and ledger consistency checks passed. The `docker version` CLI command itself could not be run because `docker.exe` is absent.
+- Seed exchange rates are fixed assignment/demo values, not live rates. Outbox delivery is log-only and has at-least-once logging semantics; no external notification integration is included. Authentication and authorization remain out of scope.
 - Rotating `CARD_NUMBER_HMAC_KEY` changes card identifiers and therefore starts new limit histories; production key rotation needs an explicit migration strategy. A time-zone database with `Europe/Istanbul` (or Windows `Turkey Standard Time`) must be available to the API runtime.
 - Ledger immutability is enforced by the EF Core save path and a unique event index, but not by a PostgreSQL trigger; direct SQL with database privileges can bypass the EF guard. No unload operation endpoint is implemented in this phase.
 - Authentication and authorization are outside the current scope. Local Compose credentials are development-only.

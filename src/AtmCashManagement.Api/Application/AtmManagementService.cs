@@ -9,7 +9,10 @@ using Npgsql;
 
 namespace AtmCashManagement.Api.Application;
 
-public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlanner depositAllocationPlanner)
+public sealed class AtmManagementService(
+    AtmDbContext db,
+    DepositAllocationPlanner depositAllocationPlanner,
+    LowCashEventRecorder lowCashEventRecorder)
 {
     private const decimal ReconciliationApprovalThresholdTry = 1000m;
 
@@ -275,6 +278,7 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
         {
             var balance = line.Cassette.Balances.SingleOrDefault(item =>
                 item.Currency == line.Note.Currency && item.Denomination == line.Note.Denomination);
+            var previousAvailable = balance?.AvailableCount ?? 0;
             if (balance is null)
             {
                 balance = new CassetteBalance(
@@ -288,6 +292,9 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             {
                 balance.AddPhysicalNotes(line.Note.Count);
             }
+
+            lowCashEventRecorder.RecordIfThresholdCrossed(
+                line.Cassette, balance, previousAvailable, occurredAt, reference);
 
             db.CassetteMovements.Add(new CassetteMovement(
                 atm.Id,
@@ -408,6 +415,7 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             var cassette = cassettesByNumber[placement.CassetteNumber];
             var balance = cassette.Balances.SingleOrDefault(item =>
                 item.Currency == placement.Currency && item.Denomination == placement.Denomination);
+            var previousAvailable = balance?.AvailableCount ?? 0;
             if (balance is null)
             {
                 balance = new CassetteBalance(
@@ -421,6 +429,9 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             {
                 balance.AddPhysicalNotes(placement.Count);
             }
+
+            lowCashEventRecorder.RecordIfThresholdCrossed(
+                cassette, balance, previousAvailable, occurredAt, cashDeposit.Id.ToString("N"));
 
             db.CassetteMovements.Add(new CassetteMovement(
                 atm.Id,
@@ -596,6 +607,7 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             {
                 existingByType.TryGetValue(noteType, out var existingBalance);
                 var expectedCount = existingBalance?.PhysicalCount ?? 0;
+                var previousAvailable = existingBalance?.AvailableCount ?? 0;
                 var countedCount = countedByType.GetValueOrDefault(noteType);
                 var differenceCount = countedCount - expectedCount;
                 var line = new CashReconciliationLine(
@@ -632,6 +644,9 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
                 {
                     existingBalance.ReconcilePhysicalCount(countedCount);
                 }
+
+                lowCashEventRecorder.RecordIfThresholdCrossed(
+                    cassette, existingBalance, previousAvailable, occurredAt, reconciliation.Id.ToString("N"));
 
                 db.CassetteMovements.Add(new CassetteMovement(
                     atm.Id,

@@ -21,6 +21,7 @@ public sealed class AtmDbContext(DbContextOptions<AtmDbContext> options) : DbCon
     public DbSet<CardDailyLimitUsage> CardDailyLimitUsages => Set<CardDailyLimitUsage>();
     public DbSet<CashWithdrawal> CashWithdrawals => Set<CashWithdrawal>();
     public DbSet<ConfirmIdempotencyRecord> ConfirmIdempotencyRecords => Set<ConfirmIdempotencyRecord>();
+    public DbSet<OutboxEvent> OutboxEvents => Set<OutboxEvent>();
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {

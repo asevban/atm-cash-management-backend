@@ -21,4 +21,7 @@ public sealed class AtmApiException(
 
     public static AtmApiException Conflict(string errorCode, string message) =>
         new(StatusCodes.Status409Conflict, errorCode, "Operation conflict", message);
+
+    public static AtmApiException ServiceUnavailable(string errorCode, string message) =>
+        new(StatusCodes.Status503ServiceUnavailable, errorCode, "Service unavailable", message);
 }

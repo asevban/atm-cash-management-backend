@@ -570,6 +570,67 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.OutboxEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CassetteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EventKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("SentAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AtmId");
+
+                    b.HasIndex("CassetteId");
+
+                    b.HasIndex("EventKey")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "CreatedAtUtc");
+
+                    b.ToTable("outbox_events", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_outbox_events_retry_count", "\"RetryCount\" >= 0");
+
+                            t.HasCheckConstraint("ck_outbox_events_sent_at", "(\"Status\" = 'Pending' AND \"SentAtUtc\" IS NULL) OR (\"Status\" = 'Sent' AND \"SentAtUtc\" IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_outbox_events_status", "\"Status\" IN ('Pending', 'Sent')");
+                        });
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.QuoteReservation", b =>
                 {
                     b.Property<Guid>("Id")
@@ -894,6 +955,25 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Withdrawal");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.OutboxEvent", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Cassette", "Cassette")
+                        .WithMany()
+                        .HasForeignKey("CassetteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Atm");
+
+                    b.Navigation("Cassette");
                 });
 
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.QuoteReservation", b =>

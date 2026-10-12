@@ -51,7 +51,8 @@ public sealed class AtmApiFixture : IAsyncLifetime
                 configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["ConnectionStrings:AtmDatabase"] = isolatedConnectionString,
-                    ["CardSecurity:CardNumberHmacKey"] = TestCardHmacKey
+                    ["CardSecurity:CardNumberHmacKey"] = TestCardHmacKey,
+                    ["Outbox:PollIntervalSeconds"] = "3600"
                 }));
             builder.ConfigureServices(services =>
             {
@@ -77,7 +78,7 @@ public sealed class AtmApiFixture : IAsyncLifetime
         }.ConnectionString);
         await connection.OpenAsync();
         await using var command = new NpgsqlCommand(
-            "TRUNCATE TABLE confirm_idempotency_records, cash_withdrawals, quote_reservations, " +
+            "TRUNCATE TABLE outbox_events, confirm_idempotency_records, cash_withdrawals, quote_reservations, " +
             "withdrawal_quote_option_allocations, withdrawal_quote_options, withdrawal_quotes, card_daily_limit_usages, " +
             "cash_reconciliation_lines, cash_reconciliations, cash_deposit_notes, cash_deposits, " +
             "cassette_movements, cassette_balances, cassettes, atms CASCADE",
@@ -130,6 +131,25 @@ public sealed class AtmApiFixture : IAsyncLifetime
         {
             throw new InvalidOperationException("The requested cassette balance row was not found.");
         }
+    }
+
+    public async Task SetOutboxInsertFailureTriggerAsync(bool enabled)
+    {
+        await using var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(_adminConnectionString)
+        {
+            SearchPath = _schema
+        }.ConnectionString);
+        await connection.OpenAsync();
+
+        var sql = enabled
+            ? "CREATE OR REPLACE FUNCTION reject_outbox_insert() RETURNS trigger LANGUAGE plpgsql AS $$ " +
+              "BEGIN RAISE EXCEPTION 'forced outbox failure'; END $$; " +
+              "CREATE TRIGGER reject_outbox_insert BEFORE INSERT ON outbox_events " +
+              "FOR EACH ROW EXECUTE FUNCTION reject_outbox_insert()"
+            : "DROP TRIGGER IF EXISTS reject_outbox_insert ON outbox_events; " +
+              "DROP FUNCTION IF EXISTS reject_outbox_insert()";
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync();
     }
 
     public async Task DisposeAsync()

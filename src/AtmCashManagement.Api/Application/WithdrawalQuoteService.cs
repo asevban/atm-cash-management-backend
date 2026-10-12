@@ -13,7 +13,8 @@ public sealed class WithdrawalQuoteService(
     AtmDbContext db,
     INoteSelectionService noteSelection,
     CardIdentifierService cardIdentifierService,
-    IClock clock)
+    IClock clock,
+    LowCashEventRecorder lowCashEventRecorder)
 {
     private static readonly TimeZoneInfo IstanbulTimeZone = GetIstanbulTimeZone();
     private static readonly IReadOnlyDictionary<Currency, int> DailyLimits = new Dictionary<Currency, int>
@@ -206,7 +207,9 @@ public sealed class WithdrawalQuoteService(
             var cassette = atm.Cassettes.Single(item => item.Number == reservation.CassetteNumber);
             var balance = cassette.Balances.Single(item =>
                 item.Currency == request.Currency && item.Denomination == reservation.Denomination);
+            var previousAvailable = balance.AvailableCount;
             balance.ReserveNotes(reservation.Count);
+            lowCashEventRecorder.RecordIfThresholdCrossed(cassette, balance, previousAvailable, now, quote.Id.ToString("N"));
             quote.AddReservation(new QuoteReservation(
                 quote.Id,
                 cassette.Id,
@@ -346,7 +349,9 @@ public sealed class WithdrawalQuoteService(
 
             if (selectedCount > 0)
             {
+                var previousAvailable = balance.AvailableCount;
                 balance.ConsumeReservedNotes(selectedCount);
+                lowCashEventRecorder.RecordIfThresholdCrossed(cassette, balance, previousAvailable, now, transactionId.ToString("N"));
                 db.CassetteMovements.Add(new CassetteMovement(
                     atm.Id,
                     cassette.Id,
@@ -361,7 +366,9 @@ public sealed class WithdrawalQuoteService(
 
             if (unusedCount > 0)
             {
+                var previousAvailable = balance.AvailableCount;
                 balance.ReleaseReservedNotes(unusedCount);
+                lowCashEventRecorder.RecordIfThresholdCrossed(cassette, balance, previousAvailable, now, transactionId.ToString("N"));
                 db.CassetteMovements.Add(new CassetteMovement(
                     atm.Id,
                     cassette.Id,
@@ -532,7 +539,9 @@ public sealed class WithdrawalQuoteService(
             var cassette = cassettesById[reservation.CassetteId];
             var balance = cassette.Balances.Single(item =>
                 item.Currency == reservation.Currency && item.Denomination == reservation.Denomination);
+            var previousAvailable = balance.AvailableCount;
             balance.ReleaseReservedNotes(reservation.ReservedCount);
+            lowCashEventRecorder.RecordIfThresholdCrossed(cassette, balance, previousAvailable, now, transactionReference);
             db.CassetteMovements.Add(new CassetteMovement(
                 quote.AtmId,
                 cassette.Id,
