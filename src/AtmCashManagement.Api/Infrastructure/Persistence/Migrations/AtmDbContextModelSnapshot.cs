@@ -426,11 +426,17 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("AtmId", "OccurredAt");
 
+                    b.HasIndex("TransactionReference", "CassetteId", "Type", "Currency", "Denomination")
+                        .IsUnique()
+                        .HasDatabaseName("IX_cassette_movements_event");
+
                     b.ToTable("cassette_movements", null, t =>
                         {
                             t.HasCheckConstraint("ck_cassette_movements_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
 
                             t.HasCheckConstraint("ck_cassette_movements_delta", "\"PhysicalCountDelta\" <> 0 OR \"ReservedCountDelta\" <> 0");
+
+                            t.HasCheckConstraint("ck_cassette_movements_delta_semantics", "((\"Type\" IN ('Load', 'Deposit') AND \"PhysicalCountDelta\" > 0 AND \"ReservedCountDelta\" = 0) OR (\"Type\" = 'Reservation' AND \"PhysicalCountDelta\" = 0 AND \"ReservedCountDelta\" > 0) OR (\"Type\" = 'ReservationRelease' AND \"PhysicalCountDelta\" = 0 AND \"ReservedCountDelta\" < 0) OR (\"Type\" = 'Withdrawal' AND \"PhysicalCountDelta\" < 0 AND \"ReservedCountDelta\" <= 0) OR (\"Type\" = 'ReconciliationAdjustment' AND \"PhysicalCountDelta\" <> 0 AND \"ReservedCountDelta\" = 0) OR (\"Type\" = 'Unload' AND \"PhysicalCountDelta\" < 0 AND \"ReservedCountDelta\" = 0))");
 
                             t.HasCheckConstraint("ck_cassette_movements_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
 

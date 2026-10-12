@@ -20,6 +20,14 @@ public sealed class CassetteMovementConfiguration : IEntityTypeConfiguration<Cas
                 "ck_cassette_movements_delta",
                 "\"PhysicalCountDelta\" <> 0 OR \"ReservedCountDelta\" <> 0");
             table.HasCheckConstraint(
+                "ck_cassette_movements_delta_semantics",
+                "((\"Type\" IN ('Load', 'Deposit') AND \"PhysicalCountDelta\" > 0 AND \"ReservedCountDelta\" = 0) OR " +
+                "(\"Type\" = 'Reservation' AND \"PhysicalCountDelta\" = 0 AND \"ReservedCountDelta\" > 0) OR " +
+                "(\"Type\" = 'ReservationRelease' AND \"PhysicalCountDelta\" = 0 AND \"ReservedCountDelta\" < 0) OR " +
+                "(\"Type\" = 'Withdrawal' AND \"PhysicalCountDelta\" < 0 AND \"ReservedCountDelta\" <= 0) OR " +
+                "(\"Type\" = 'ReconciliationAdjustment' AND \"PhysicalCountDelta\" <> 0 AND \"ReservedCountDelta\" = 0) OR " +
+                "(\"Type\" = 'Unload' AND \"PhysicalCountDelta\" < 0 AND \"ReservedCountDelta\" = 0))");
+            table.HasCheckConstraint(
                 "ck_cassette_movements_initial_load_type",
                 "NOT \"IsInitialLoad\" OR \"Type\" = 'Load'");
         });
@@ -35,6 +43,16 @@ public sealed class CassetteMovementConfiguration : IEntityTypeConfiguration<Cas
         builder.Property(movement => movement.IsInitialLoad).IsRequired();
         builder.HasIndex(movement => new { movement.AtmId, movement.OccurredAt });
         builder.HasIndex(movement => movement.TransactionReference);
+        builder.HasIndex(movement => new
+            {
+                movement.TransactionReference,
+                movement.CassetteId,
+                movement.Type,
+                movement.Currency,
+                movement.Denomination
+            })
+            .IsUnique()
+            .HasDatabaseName("IX_cassette_movements_event");
         builder.HasOne(movement => movement.Atm)
             .WithMany()
             .HasForeignKey(movement => movement.AtmId)

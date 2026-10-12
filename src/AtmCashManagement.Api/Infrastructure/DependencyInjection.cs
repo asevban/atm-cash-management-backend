@@ -20,6 +20,7 @@ public static class DependencyInjection
         services.AddDbContext<AtmDbContext>(options => options.UseNpgsql(connectionString));
         services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("database");
         services.AddScoped<AtmManagementService>();
+        services.AddScoped<CassetteLedgerConsistencyService>();
         services.AddScoped<WithdrawalQuoteService>();
         services.AddSingleton<INoteSelectionService, NoteSelectionService>();
         services.AddSingleton<DepositAllocationPlanner>();

@@ -6,7 +6,9 @@ namespace AtmCashManagement.Api.Controllers;
 
 [ApiController]
 [Route("api/atms")]
-public sealed class AtmsController(AtmManagementService service) : ControllerBase
+public sealed class AtmsController(
+    AtmManagementService service,
+    CassetteLedgerConsistencyService ledgerConsistencyService) : ControllerBase
 {
     [HttpPost]
     [ProducesResponseType<AtmResponse>(StatusCodes.Status201Created)]
@@ -89,4 +91,12 @@ public sealed class AtmsController(AtmManagementService service) : ControllerBas
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<AtmBalanceResponse>> GetBalances(Guid id, CancellationToken cancellationToken) =>
         Ok(await service.GetBalancesAsync(id, cancellationToken));
+
+    [HttpGet("{id:guid}/ledger/consistency")]
+    [ProducesResponseType<LedgerConsistencyResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<LedgerConsistencyResponse>> GetLedgerConsistency(
+        Guid id,
+        CancellationToken cancellationToken) =>
+        Ok(await ledgerConsistencyService.CheckAsync(id, cancellationToken));
 }

@@ -35,6 +35,8 @@ public sealed class CassetteMovement
             throw new ArgumentException("A movement must change physical or reserved note counts.");
         }
 
+        ValidateDeltas(type, physicalCountDelta, reservedCountDelta);
+
         if (string.IsNullOrWhiteSpace(transactionReference) || transactionReference.Length > 100)
         {
             throw new ArgumentException("A transaction reference between 1 and 100 characters is required.", nameof(transactionReference));
@@ -56,6 +58,25 @@ public sealed class CassetteMovement
         OccurredAt = occurredAt;
         TransactionReference = transactionReference;
         IsInitialLoad = isInitialLoad;
+    }
+
+    private static void ValidateDeltas(CassetteMovementType type, int physicalDelta, int reservedDelta)
+    {
+        var valid = type switch
+        {
+            CassetteMovementType.Load or CassetteMovementType.Deposit => physicalDelta > 0 && reservedDelta == 0,
+            CassetteMovementType.Reservation => physicalDelta == 0 && reservedDelta > 0,
+            CassetteMovementType.ReservationRelease => physicalDelta == 0 && reservedDelta < 0,
+            CassetteMovementType.Withdrawal => physicalDelta < 0 && reservedDelta <= 0,
+            CassetteMovementType.ReconciliationAdjustment => physicalDelta != 0 && reservedDelta == 0,
+            CassetteMovementType.Unload => physicalDelta < 0 && reservedDelta == 0,
+            _ => false
+        };
+
+        if (!valid)
+        {
+            throw new ArgumentException($"The physical and reserved deltas are invalid for movement type {type}.");
+        }
     }
 
     public Guid Id { get; private set; }

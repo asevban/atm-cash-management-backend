@@ -161,7 +161,26 @@ The schema contains:
 - `WithdrawalQuote`, `WithdrawalQuoteOption`, `WithdrawalQuoteOptionAllocation`, and `QuoteReservation`: expiring quote state, individual selectable plans, and the combined cassette-level reservation.
 - `CashWithdrawal`, `CardDailyLimitUsage`, and `ConfirmIdempotencyRecord`: confirmed withdrawal facts, card/currency/day limit usage, and durable successful confirm replay results. Card identifiers are HMAC-SHA256 values.
 
-The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. Withdrawal quote creation writes `RESERVATION`; confirmation writes `WITHDRAWAL` for physical and reserved counts consumed and `RESERVATION_RELEASE` for unused reserved notes. Cancellation and expiration write `RESERVATION_RELEASE`. References point to the quote or withdrawal transaction. There are no movement edit/delete endpoints; the B8 consistency endpoint is deferred.
+The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVATION`, `RESERVATION_RELEASE`, and `RECONCILIATION_ADJUSTMENT`. Withdrawal quote creation writes `RESERVATION`; confirmation writes `WITHDRAWAL` for physical and reserved counts consumed and `RESERVATION_RELEASE` for unused reserved notes. Cancellation and expiration write `RESERVATION_RELEASE`. References point to the quote or withdrawal transaction. This phase does not add an unload operation endpoint.
+
+### Movement ledger and consistency (B8)
+
+Movement deltas use a single sign convention:
+
+| Type | Physical delta | Reserved delta |
+| --- | --- | --- |
+| `LOAD`, `DEPOSIT` | Positive | Zero |
+| `RESERVATION` | Zero | Positive |
+| `RESERVATION_RELEASE` | Zero | Negative |
+| `WITHDRAWAL` | Negative | Negative for reserved notes consumed (zero is permitted for an unreserved withdrawal) |
+| `RECONCILIATION_ADJUSTMENT` | Positive or negative | Zero |
+| `UNLOAD` | Negative | Zero |
+
+Quote confirmation reduces physical and reserved counts together for dispensed notes. A separate `RESERVATION_RELEASE` records only unused reserved notes, so the physical amount is never counted twice. Constructor validation and a PostgreSQL check constraint enforce the type/delta signs. A unique database index on transaction reference, cassette, movement type, currency, and denomination prevents a transaction from recording the same cassette/note event twice.
+
+`GET /api/atms/{id}/ledger/consistency` compares every cassette balance row with grouped sums of its movement deltas. It examines the union of balance and ledger note types, reports both sides when a row is missing, checks `available = physical - reserved`, and flags negative or impossible totals. Physical, reserved, and available differences are calculated as database count minus ledger count. It runs as a read-only PostgreSQL `REPEATABLE READ` transaction. The endpoint returns HTTP 200 with `isConsistent: false` and a list of differences when it finds a mismatch; an unknown ATM returns 404 ProblemDetails. It never repairs balances.
+
+EF Core rejects updates and deletes of tracked `CassetteMovement` rows. There is no database trigger preventing a privileged direct SQL client from modifying the ledger; database administrators remain able to bypass the application-level append-only guard.
 
 ## Data integrity and transaction decisions
 
@@ -169,6 +188,7 @@ The movement model supports `LOAD`, `UNLOAD`, `WITHDRAWAL`, `DEPOSIT`, `RESERVAT
 - Configuration, loading, state changes, deposits, reconciliations, and withdrawal operations lock the ATM row with `SELECT ... FOR UPDATE` inside a database transaction. Withdrawal operations acquire locks in a consistent order: daily-limit rows (sorted), ATM, then quote. This serializes cassette use and cancel/confirm/expiration for the same ATM/quote. Daily-limit rows are keyed by HMAC card identifier, currency, and Istanbul business date, and locked in PostgreSQL across ATM instances.
 - Idempotency keys have a database unique constraint and a PostgreSQL transaction advisory lock during replay/creation. The idempotency request identity, successful response, quote state, withdrawal, balances, daily-limit transition, and ledger rows commit atomically.
 - Quote expiration uses persisted UTC timestamps and an injectable clock in tests. The expiration worker is repeatable: it locks and rechecks each active quote before releasing reservations, so competing workers and API operations cannot double-release.
+- PostgreSQL ledger consistency reads use one repeatable-read snapshot so a balance update and its movement are observed together, even while other ATM operations commit.
 - For daily limits, an active quote reserves the maximum value of its offered options once. Confirmation moves the selected value from reserved usage to confirmed usage in the same transaction, avoiding a temporary double count.
 - A load request validates every cassette and note entry before changing balances. Physical-count updates, `LOAD` movements, and the initial-load completion marker commit in the same transaction. Invalid requests do not leave partial balance or ledger changes.
 - The initial load is considered complete when a single successful request explicitly includes slots 1 through 5, contains at least one banknote overall, and passes all type and capacity checks. Empty `notes` arrays mean those cassettes were checked and left empty. This resolves the assignment's ambiguity about the completion boundary.
@@ -183,14 +203,14 @@ dotnet restore AtmCashManagement.sln
 dotnet build AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The xUnit suite includes domain-rule, note-selection, and deposit-routing unit tests, plus HTTP integration tests against a real PostgreSQL database. The integration fixture creates an isolated temporary schema and removes it after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated test database before running:
+The xUnit suite includes domain-rule, note-selection, and deposit-routing unit tests, plus HTTP integration tests against a real PostgreSQL database. Each integration fixture creates an isolated temporary schema and removes only that schema after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated PostgreSQL test database before running:
 
 ```powershell
 $env:ATM_TEST_CONNECTION_STRING = "Host=localhost;Port=5432;Database=atm_cash_test;Username=atm_app;Password=dev-only-change-me;GSS Encryption Mode=Disable"
 dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The unit tests include the B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation; deposit routing tests cover matched and unmatched notes, duplicate recycling slots, overflow, capacity returns, mixed currencies, and invalid inputs. PostgreSQL integration tests cover exact and alternative quotes, union reservations, release/consumption, idempotency, expiration, all currency limits, HMAC storage, ATM state validation, movement rows, and concurrent quote/confirm/cancel races.
+The unit tests include the B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation; deposit routing tests cover matched and unmatched notes, duplicate recycling slots, overflow, capacity returns, mixed currencies, and invalid inputs. PostgreSQL integration tests cover exact and alternative quotes, union reservations, release/consumption, idempotency, expiration, all currency limits, HMAC storage, ATM state validation, movement rows, and the B6 concurrency scenarios. The independent `AtmPostgreSqlConcurrencyTests` class starts HTTP operations behind a shared task barrier; each request is handled by its own scoped `DbContext` and PostgreSQL transaction. It covers last-note contention, multi-request stock contention, confirm replay, confirm/cancel races, and a shared daily limit across two ATMs. `CassetteLedgerConsistencyTests` verifies ledger reconstruction through load, deposit, reservation, release, withdrawal, expiration, reconciliation, empty cassettes, mixed deposit-only note types, immutable event keys, and a deliberately corrupted balance in the fixture's isolated schema.
 
 ## EF Core migrations
 
@@ -207,9 +227,10 @@ dotnet ef migrations add MigrationName --project src/AtmCashManagement.Api --sta
 
 ## Unfinished items and limitations
 
-- B9 four-eyes/X-User approval and TRY 1,000 threshold, B10 general TRY conversion and advanced operational reports/alerts/outbox, and the B8 ledger consistency endpoint are not implemented. Authentication and authorization remain out of scope.
+- Phase 6.1 was validated on Windows where `docker.exe` was not available on `PATH` or in the standard Docker Desktop CLI path. The installed standalone Compose plugin (`docker-compose.exe` v5.5.1) was used against Docker Engine 29.8.2: the API image was rebuilt, the existing PostgreSQL container and volume were retained, the Phase 6 migration was applied to the existing `atm_cash` database, and health plus HTTP quote/confirm/ledger-consistency checks passed. The `docker version` CLI command itself could not be run.
+- B9 four-eyes/X-User approval and TRY 1,000 threshold, and B10 general TRY conversion and advanced operational reports/alerts/outbox are not implemented. Authentication and authorization remain out of scope.
 - Rotating `CARD_NUMBER_HMAC_KEY` changes card identifiers and therefore starts new limit histories; production key rotation needs an explicit migration strategy. A time-zone database with `Europe/Istanbul` (or Windows `Turkey Standard Time`) must be available to the API runtime.
-- The ledger is append-only through the current API surface, but database-level immutability triggers and ledger-based balance reconstruction are deferred to the B8 phase.
+- Ledger immutability is enforced by the EF Core save path and a unique event index, but not by a PostgreSQL trigger; direct SQL with database privileges can bypass the EF guard. No unload operation endpoint is implemented in this phase.
 - Authentication and authorization are outside the current scope. Local Compose credentials are development-only.
 - The initial load must cover all five slots in one request. No endpoint pre-creates empty slots; configuration creates each physical slot once, protected by the ATM/slot uniqueness constraint.
 
