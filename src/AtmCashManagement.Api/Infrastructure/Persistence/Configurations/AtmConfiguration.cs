@@ -17,6 +17,7 @@ public sealed class AtmConfiguration : IEntityTypeConfiguration<Atm>
         builder.HasIndex(atm => atm.Code).IsUnique();
         builder.Property(atm => atm.State).HasConversion<string>().HasMaxLength(20).IsRequired();
         builder.Property(atm => atm.CreatedAt).IsRequired();
+        builder.Property(atm => atm.InitialLoadCompletedAt);
         builder.HasMany(atm => atm.Cassettes)
             .WithOne(cassette => cassette.Atm)
             .HasForeignKey(cassette => cassette.AtmId)

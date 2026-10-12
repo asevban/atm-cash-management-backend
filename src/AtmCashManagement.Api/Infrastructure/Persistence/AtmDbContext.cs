@@ -8,6 +8,7 @@ public sealed class AtmDbContext(DbContextOptions<AtmDbContext> options) : DbCon
     public DbSet<Atm> Atms => Set<Atm>();
     public DbSet<Cassette> Cassettes => Set<Cassette>();
     public DbSet<CassetteBalance> CassetteBalances => Set<CassetteBalance>();
+    public DbSet<CassetteMovement> CassetteMovements => Set<CassetteMovement>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

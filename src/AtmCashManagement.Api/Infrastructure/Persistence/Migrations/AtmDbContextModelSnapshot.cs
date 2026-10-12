@@ -36,6 +36,9 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTimeOffset?>("InitialLoadCompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("State")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -142,6 +145,70 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CassetteMovement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AtmId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CassetteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<int>("Denomination")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsInitialLoad")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PhysicalCountDelta")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ReservedCountDelta")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TransactionReference")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CassetteId");
+
+                    b.HasIndex("TransactionReference");
+
+                    b.HasIndex("AtmId", "OccurredAt");
+
+                    b.ToTable("cassette_movements", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cassette_movements_currency", "\"Currency\" IN ('TRY', 'USD', 'EUR')");
+
+                            t.HasCheckConstraint("ck_cassette_movements_delta", "\"PhysicalCountDelta\" <> 0 OR \"ReservedCountDelta\" <> 0");
+
+                            t.HasCheckConstraint("ck_cassette_movements_denomination", "\"Denomination\" IN (20, 50, 100, 500)");
+
+                            t.HasCheckConstraint("ck_cassette_movements_initial_load_type", "NOT \"IsInitialLoad\" OR \"Type\" = 'Load'");
+
+                            t.HasCheckConstraint("ck_cassette_movements_type", "\"Type\" IN ('Load', 'Unload', 'Withdrawal', 'Deposit', 'Reservation', 'ReservationRelease', 'ReconciliationAdjustment')");
+                        });
+                });
+
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.Cassette", b =>
                 {
                     b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
@@ -160,6 +227,25 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         .HasForeignKey("CassetteId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("Cassette");
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CassetteMovement", b =>
+                {
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Atm", "Atm")
+                        .WithMany()
+                        .HasForeignKey("AtmId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AtmCashManagement.Api.Domain.Entities.Cassette", "Cassette")
+                        .WithMany()
+                        .HasForeignKey("CassetteId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Atm");
 
                     b.Navigation("Cassette");
                 });

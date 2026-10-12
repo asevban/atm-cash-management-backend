@@ -56,4 +56,19 @@ public sealed class CassetteBalance
     public int ReservedCount { get; private set; }
     public int AvailableCount => PhysicalCount - ReservedCount;
     public Cassette Cassette { get; private set; } = null!;
+
+    public void AddPhysicalNotes(int count)
+    {
+        if (count <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), "The number of notes to load must be positive.");
+        }
+
+        if (PhysicalCount + count > 100)
+        {
+            throw new InvalidOperationException("A balance entry cannot exceed 100 physical notes.");
+        }
+
+        PhysicalCount += count;
+    }
 }

@@ -1,5 +1,6 @@
 using AtmCashManagement.Api.Infrastructure.Health;
 using AtmCashManagement.Api.Infrastructure.Persistence;
+using AtmCashManagement.Api.Application;
 using Microsoft.EntityFrameworkCore;
 
 namespace AtmCashManagement.Api.Infrastructure;
@@ -18,6 +19,7 @@ public static class DependencyInjection
 
         services.AddDbContext<AtmDbContext>(options => options.UseNpgsql(connectionString));
         services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("database");
+        services.AddScoped<AtmManagementService>();
 
         return services;
     }
