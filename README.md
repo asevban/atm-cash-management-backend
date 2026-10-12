@@ -1,6 +1,6 @@
 # ATM Cash Management Backend
 
-ASP.NET Core 10 REST API for per-ATM cassette configuration, initial and maintenance cash loading, lifecycle control, balance reporting, and the first stage of the cassette movement ledger. PostgreSQL is accessed through EF Core Code First. Pending migrations are applied automatically when the API starts.
+ASP.NET Core 10 REST API for per-ATM cassette configuration, initial and maintenance cash loading, lifecycle control, balance reporting, and the first stage of the cassette movement ledger. It also includes a pure application service for optimal banknote selection from a supplied stock snapshot. PostgreSQL is accessed through EF Core Code First. Pending migrations are applied automatically when the API starts.
 
 ## Requirements
 
@@ -84,6 +84,14 @@ The operation endpoints advance initial setup automatically: successful configur
 
 Central, testable state rules also expose checks for customer cash operations (allowed only in `IN_SERVICE`), loading (initially in `CONFIGURED`, later in `MAINTENANCE`), configuration (initially in `UNCONFIGURED`, later in `MAINTENANCE`), and reconciliation (in `MAINTENANCE`). Withdrawal, deposit, and reconciliation endpoints are not part of this phase.
 
+### Optimal note selection (B3)
+
+`INoteSelectionService` accepts a requested currency and amount, cassette stock snapshots, and an optional remaining daily limit for filtering an upper alternative. It uses only matching `RECYCLING` cassettes. Available notes are `PhysicalCount - ReservedCount`; deposit-only stock and notes reserved by another operation are excluded. The service returns an exact option when possible, otherwise the closest payable lower and upper amounts with their minimum-note allocations. An upper option above the supplied limit is omitted. The service only calculates a plan: it does not reserve notes, change balances, write movement rows, or read from EF Core. No B3 HTTP endpoint is exposed yet.
+
+The selector uses bounded dynamic programming grouped by denomination, not a greedy largest-note-first rule. For each denomination, a sliding-window transition considers only the available count and records the minimum note count for each reachable total. Processing denominations from largest to smallest gives deterministic denomination tie-breaking; the bounded transition takes fewer notes of the current denomination when note counts tie. It reconstructs choices using per-denomination decision arrays. With at most four recycling cassettes, 100 notes per cassette, and denominations up to 500, the amount range is at most 200,000; time is O(D × M) and reconstruction storage is O(D × M), where D ≤ 4 denomination groups and M is the maximum payable total.
+
+When a denomination exists in more than one recycling cassette, the chosen total count for that denomination is allocated after optimization. Cassettes are ordered by physical fill ratio (`PhysicalCount / Capacity`) from highest to lowest, then by cassette slot number ascending. Reserved notes reduce the available count but do not change the physical fill ratio. This allocation rule preserves the minimum-note result while preferring the fuller cassette for equal denominations.
+
 ## Architecture and data model
 
 The project is a modular monolith in one Web API project. `Domain` contains entities, enums, and lifecycle rules; `Application` contains request contracts, validation, and ATM operations; `Infrastructure` contains EF Core persistence, migration startup, API exception handling, and the database health check.
@@ -114,14 +122,14 @@ dotnet restore AtmCashManagement.sln
 dotnet build AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The xUnit suite includes domain-rule unit tests and HTTP integration tests against a real PostgreSQL database. The integration fixture creates an isolated temporary schema and removes it after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated test database before running:
+The xUnit suite includes domain-rule and note-selection unit tests, plus HTTP integration tests against a real PostgreSQL database. The integration fixture creates an isolated temporary schema and removes it after the tests. Set `ATM_TEST_CONNECTION_STRING` to a dedicated test database before running:
 
 ```powershell
 $env:ATM_TEST_CONNECTION_STRING = "Host=localhost;Port=5432;Database=atm_cash_test;Username=atm_app;Password=dev-only-change-me;GSS Encryption Mode=Disable"
 dotnet test AtmCashManagement.sln --no-restore --maxcpucount:1
 ```
 
-The integration tests cover create/configure/load/state/balance HTTP flows, state and configuration rejection, mixed deposit-only balances, repeated recycling pairs, exact capacity, over-capacity rejection, atomic failed loads, ATM isolation, and the real PostgreSQL movement rows.
+The unit tests include the eight B3 acceptance scenarios and additional cases for empty and wrong-currency stock, deposit-only exclusion, reservations, repeated denominations, cassette fill priority, capacity validation, upper-limit filtering, determinism, and non-mutation. The integration tests cover create/configure/load/state/balance HTTP flows, state and configuration rejection, mixed deposit-only balances, repeated recycling pairs, exact capacity, over-capacity rejection, atomic failed loads, ATM isolation, and the real PostgreSQL movement rows.
 
 ## EF Core migrations
 
@@ -138,7 +146,7 @@ dotnet ef migrations add MigrationName --project src/AtmCashManagement.Api --sta
 
 ## Unfinished items and limitations
 
-- Withdrawal quote/confirm, note-selection algorithm, reservations, daily card limits, deposits, reconciliation, approvals, operational reports/alerts, outbox processing, and the B8 ledger consistency endpoint are not implemented.
+- Withdrawal quote/confirm, reservation creation and release, daily card-limit management, deposits, reconciliation, approvals, operational reports/alerts, outbox processing, and the B8 ledger consistency endpoint are not implemented. The B3 note-selection calculation is implemented as an application service, but it is not yet wired to a withdrawal endpoint.
 - The ledger is append-only through the current API surface, but database-level immutability triggers and ledger-based balance reconstruction are deferred to the B8 phase.
 - Authentication and authorization are outside the current scope. Local Compose credentials are development-only.
 - The initial load must cover all five slots in one request. No endpoint pre-creates empty slots; configuration creates each physical slot once, protected by the ATM/slot uniqueness constraint.
