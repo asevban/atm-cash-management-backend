@@ -23,7 +23,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_HTTP_PORTS: "8080"
-      CardSecurity__CardNumberHmacKey: ${CARD_NUMBER_HMAC_KEY:?Set CARD_NUMBER_HMAC_KEY to a stable secret of at least 32 bytes}
+      CardSecurity__CardNumberHmacKey: ${CARD_NUMBER_HMAC_KEY:-atm-cash-local-development-only-hmac-key-NOT-FOR-PRODUCTION-2026}
       ConnectionStrings__AtmDatabase: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-atm_cash};Username=${POSTGRES_USER:-atm_app};Password=${POSTGRES_PASSWORD:-dev-only-change-me};GSS Encryption Mode=Disable"
     depends_on:
       postgres:

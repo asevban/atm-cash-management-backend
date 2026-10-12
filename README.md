@@ -12,7 +12,11 @@ ASP.NET Core 10 REST API for per-ATM cassette configuration, cash loading and de
 From the repository root:
 
 ```powershell
-$env:CARD_NUMBER_HMAC_KEY = "<stable secret with at least 32 bytes>"
+# Fresh local development database: Compose uses a fixed, development-only key.
+docker compose up --build -d
+
+# Existing database: keep using the exact key that was used previously.
+$env:CARD_NUMBER_HMAC_KEY = "<same stable key with at least 32 bytes>"
 docker compose up --build -d
 ```
 
@@ -26,7 +30,21 @@ Stop the containers with `docker compose down`. The named `postgres-data` volume
 
 The default PostgreSQL credentials in `compose.yaml` and `appsettings.json` are for local development only. Replace them with managed secrets before any shared or production deployment. Compose values can be overridden with `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` environment variables.
 
-`CARD_NUMBER_HMAC_KEY` is required and must remain stable for the database's lifetime. It is used to create a deterministic HMAC-SHA256 card identifier; the key and original card number are never stored in the database. Supply the key through the environment or a secret manager and do not commit it.
+`CARD_NUMBER_HMAC_KEY` is used to create a deterministic HMAC-SHA256 card identifier; the key and original card number are never stored in the database. For a fresh local Compose setup, the fallback key is fixed and explicitly development-only so the sample starts without secret setup. It is public and unsafe for production. For any database that has already been used with another key, keep supplying that same key; changing it changes card identifiers and separates their daily-limit history. Production deployments must supply a strong secret through a secret manager and must not use the Compose development fallback.
+
+### Postman end-to-end verification
+
+The importable files are `postman/AtmCashManagement.postman_collection.json` and `postman/AtmCashManagement.local.postman_environment.json`. In Postman, import both files, select **ATM Cash Management - Local**, and run the full collection in order. The environment defaults to `http://localhost:8080`; change `baseUrl` only if the API listens elsewhere. The collection creates a unique ATM code, synthetic numeric test card, and idempotency key on every run, then stores response IDs and reconciliation snapshots automatically. It does not contain a real card number or the HMAC key. Each full run creates two synthetic ATMs and intentionally leaves them in the database; the collection never clears user or development data.
+
+Folder **01 - Required End-to-End Scenario** follows the assignment's ten business actions: create ATM, configure, initial load, enter service, request quote, confirm, deposit, switch to maintenance, reconcile, and read the ATM operations report. Read-only balance requests immediately after confirmation and after entering maintenance verify stock movement and provide the actual physical-count reconciliation snapshot; these are supporting checks between the ten business actions. Folder **02 - Additional Verification** replays the same confirmation, checks balances and ledger consistency, exercises B9 two-person approval, reads network operations totals, and creates a separate low-cash scenario whose quote crosses the configured threshold. The extra folder's replay and approval checks depend on the ATM created by folder 01; run the full collection from the beginning.
+
+The collection has been verified with Newman against the local API. Its low-cash HTTP scenario causes the outbox event to be recorded; the application has no public outbox inspection endpoint, so persisted event status is checked separately through PostgreSQL during the phase smoke check.
+
+With Node.js/npm installed and registry access available to fetch Newman on first use, the verified command is:
+
+```powershell
+npx --yes newman run postman/AtmCashManagement.postman_collection.json --environment postman/AtmCashManagement.local.postman_environment.json --reporters cli
+```
 
 ## API endpoints
 

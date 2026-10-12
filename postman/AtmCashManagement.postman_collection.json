@@ -1,0 +1,982 @@
+{
+  "info": {
+    "_postman_id": "61fb998c-1a83-4d1c-b49c-c39c01710901",
+    "name": "ATM Cash Management",
+    "description": "Phase 9: repeatable end-to-end API verification. Uses a unique synthetic card number and ATM code on every run. No real card number or HMAC secret is stored in this collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 - Required End-to-End Scenario",
+      "description": "Required business actions in the assignment order. A read-only balance request after confirmation verifies physical and reserved counts before the deposit.",
+      "item": [
+        {
+          "name": "01 Create ATM",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now().toString(36) + Math.random().toString(16).slice(2, 8);",
+                  "pm.environment.unset('atmId');",
+                  "pm.environment.unset('quoteId');",
+                  "pm.environment.unset('selectedOptionId');",
+                  "pm.environment.unset('reconciliationId');",
+                  "pm.environment.unset('withdrawalTransactionId');",
+                  "pm.environment.set('atmCode', 'P9-' + suffix.toUpperCase());",
+                  "pm.environment.set('testCardNumber', '9999' + Date.now().toString() + Math.floor(Math.random() * 100).toString().padStart(2, '0'));",
+                  "pm.environment.set('idempotencyKey', 'p9-confirm-' + suffix);",
+                  "pm.environment.set('lowCashCardNumber', '8888' + Date.now().toString() + Math.floor(Math.random() * 100).toString().padStart(2, '0'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create ATM returns 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.test('New ATM starts UNCONFIGURED with no cassettes', function () {",
+                  "  pm.expect(body.state).to.eql('UNCONFIGURED');",
+                  "  pm.expect(body.cassettes).to.be.an('array').that.is.empty;",
+                  "  pm.expect(body.id).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.code).to.eql(pm.environment.get('atmCode'));",
+                  "});",
+                  "pm.environment.set('atmId', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"code\":\"{{atmCode}}\"}"
+            },
+            "url": "{{baseUrl}}/api/atms"
+          }
+        },
+        {
+          "name": "02 Configure five cassettes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configure cassettes returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('ATM is CONFIGURED with four recycling and one deposit-only cassette', function () {",
+                  "  pm.expect(body.state).to.eql('CONFIGURED');",
+                  "  pm.expect(body.cassettes).to.have.length(5);",
+                  "  pm.expect(body.cassettes.filter(c => c.type === 'RECYCLING')).to.have.length(4);",
+                  "  pm.expect(body.cassettes.filter(c => c.type === 'DEPOSIT_ONLY')).to.have.length(1);",
+                  "  pm.expect(body.cassettes.some(c => c.type === 'RECYCLING' && c.currency === 'USD')).to.eql(true);",
+                  "  pm.expect(body.cassettes.some(c => c.type === 'RECYCLING' && c.currency === 'EUR')).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cassettes\":[{\"number\":1,\"type\":\"DEPOSIT_ONLY\",\"capacity\":100},{\"number\":2,\"type\":\"RECYCLING\",\"currency\":\"TRY\",\"denomination\":\"100\",\"capacity\":100},{\"number\":3,\"type\":\"RECYCLING\",\"currency\":\"TRY\",\"denomination\":\"50\",\"capacity\":100},{\"number\":4,\"type\":\"RECYCLING\",\"currency\":\"USD\",\"denomination\":\"20\",\"capacity\":100},{\"number\":5,\"type\":\"RECYCLING\",\"currency\":\"EUR\",\"denomination\":\"50\",\"capacity\":100}]}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/configure"
+          }
+        },
+        {
+          "name": "03 Load initial cash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Initial load returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('ATM is LOADED and initial recycling balances match the fixture', function () {",
+                  "  pm.expect(body.state).to.eql('LOADED');",
+                  "  const slots = Object.fromEntries(body.cassettes.map(c => [c.number, c]));",
+                  "  pm.expect(slots[1].physicalCount).to.eql(0);",
+                  "  pm.expect(slots[2].balances.find(b => b.currency === 'TRY' && Number(b.denomination) === 100).physicalCount).to.eql(10);",
+                  "  pm.expect(slots[3].balances.find(b => b.currency === 'TRY' && Number(b.denomination) === 50).physicalCount).to.eql(4);",
+                  "  pm.expect(slots[4].balances.find(b => b.currency === 'USD' && Number(b.denomination) === 20).physicalCount).to.eql(3);",
+                  "  pm.expect(slots[5].balances.find(b => b.currency === 'EUR' && Number(b.denomination) === 50).physicalCount).to.eql(3);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cassettes\":[{\"cassetteNumber\":1,\"notes\":[]},{\"cassetteNumber\":2,\"notes\":[{\"currency\":\"TRY\",\"denomination\":\"100\",\"count\":10}]},{\"cassetteNumber\":3,\"notes\":[{\"currency\":\"TRY\",\"denomination\":\"50\",\"count\":4}]},{\"cassetteNumber\":4,\"notes\":[{\"currency\":\"USD\",\"denomination\":\"20\",\"count\":3}]},{\"cassetteNumber\":5,\"notes\":[{\"currency\":\"EUR\",\"denomination\":\"50\",\"count\":3}]}]}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/load"
+          }
+        },
+        {
+          "name": "04 Put ATM in service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Transition to IN_SERVICE returns 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('ATM is IN_SERVICE', function () { pm.expect(pm.response.json().state).to.eql('IN_SERVICE'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"IN_SERVICE\"}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/state"
+          }
+        },
+        {
+          "name": "05 Request exact withdrawal quote",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Withdrawal quote returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Quote is ACTIVE and offers an exact, payable 300 TRY combination from recycling cassettes', function () {",
+                  "  pm.expect(body.status).to.eql('ACTIVE');",
+                  "  pm.expect(body.currency).to.eql('TRY');",
+                  "  pm.expect(body.requestedAmount).to.eql(300);",
+                  "  const option = body.options.find(o => o.kind === 'EXACT' && o.amount === 300);",
+                  "  pm.expect(option, 'exact option').to.exist;",
+                  "  const paid = option.allocations.reduce((sum, a) => sum + Number(a.denomination) * a.count, 0);",
+                  "  pm.expect(paid).to.eql(300);",
+                  "  pm.expect(option.noteCount).to.eql(option.allocations.reduce((sum, a) => sum + a.count, 0));",
+                  "  pm.expect(option.allocations.every(a => a.cassetteNumber !== 1)).to.eql(true);",
+                  "});",
+                  "const selected = body.options.find(o => o.kind === 'EXACT' && o.amount === 300);",
+                  "pm.environment.set('quoteId', body.quoteId);",
+                  "pm.environment.set('selectedOptionId', selected.optionId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cardNumber\":\"{{testCardNumber}}\",\"currency\":\"TRY\",\"requestedAmount\":300}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/withdrawal-quotes"
+          }
+        },
+        {
+          "name": "06 Confirm withdrawal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Withdrawal confirmation returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Confirmation records the exact amount, currency and note plan', function () {",
+                  "  pm.expect(body.amount).to.eql(300);",
+                  "  pm.expect(body.currency).to.eql('TRY');",
+                  "  pm.expect(body.quoteId).to.eql(pm.environment.get('quoteId'));",
+                  "  pm.expect(body.allocations.reduce((sum, a) => sum + Number(a.denomination) * a.count, 0)).to.eql(300);",
+                  "  pm.expect(body.allocations.reduce((sum, a) => sum + a.count, 0)).to.eql(3);",
+                  "});",
+                  "pm.environment.set('withdrawalTransactionId', body.transactionId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"selectedOptionId\":\"{{selectedOptionId}}\"}"
+            },
+            "url": "{{baseUrl}}/api/withdrawal-quotes/{{quoteId}}/confirm"
+          }
+        },
+        {
+          "name": "06a Verify stock after confirmation",
+          "description": "Read-only assertion call; confirms withdrawal consumption and reservation release before deposit.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Balance read after confirmation returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "const cassette = number => body.cassettes.find(c => c.number === number);",
+                  "const balance = (number, currency, denomination) => cassette(number).balances.find(b => b.currency === currency && Number(b.denomination) === denomination);",
+                  "pm.test('Chosen notes left physical stock and all reservations were released', function () {",
+                  "  pm.expect(cassette(2).physicalCount).to.eql(7);",
+                  "  pm.expect(cassette(2).reservedCount).to.eql(0);",
+                  "  pm.expect(balance(2, 'TRY', 100).physicalCount).to.eql(7);",
+                  "  pm.expect(balance(2, 'TRY', 100).reservedCount).to.eql(0);",
+                  "  pm.expect(balance(2, 'TRY', 100).availableCount).to.eql(7);",
+                  "  pm.expect(balance(3, 'TRY', 50).physicalCount).to.eql(4);",
+                  "  pm.expect(cassette(1).physicalCount).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/balances"
+          }
+        },
+        {
+          "name": "07 Deposit cash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Deposit returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Deposit acceptance, placement and returned note counts are correct', function () {",
+                  "  pm.expect(body.transactionId).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.acceptedNotes.find(n => n.currency === 'TRY' && Number(n.denomination) === 100).count).to.eql(1);",
+                  "  pm.expect(body.placements.reduce((sum, p) => sum + p.count, 0)).to.eql(1);",
+                  "  pm.expect(body.placements[0].cassetteNumber).to.eql(2);",
+                  "  pm.expect(body.capacityReturns).to.be.an('array').that.is.empty;",
+                  "  pm.expect(body.unrecognizedNoteCount).to.eql(1);",
+                  "  pm.expect(body.acceptedValueByCurrency.find(v => v.currency === 'TRY').totalValue).to.eql(100);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"notes\":[{\"currency\":\"TRY\",\"denomination\":\"100\",\"count\":1}],\"unrecognizedNoteCount\":1}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/deposits"
+          }
+        },
+        {
+          "name": "08 Switch to maintenance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Transition to MAINTENANCE returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('ATM is in maintenance', function () {",
+                  "  pm.expect(body.state).to.eql('MAINTENANCE');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"MAINTENANCE\"}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/state"
+          }
+        },
+        {
+          "name": "08a Read physical balances and prepare reconciliation snapshot",
+          "description": "Uses the actual balance endpoint because the state-transition DTO intentionally omits cassette navigation data.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Maintenance balance snapshot returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Snapshot covers all five cassettes in maintenance', function () {",
+                  "  pm.expect(body.state).to.eql('MAINTENANCE');",
+                  "  pm.expect(body.cassettes).to.have.length(5);",
+                  "  pm.expect(body.cassettes.every(c => Array.isArray(c.balances))).to.eql(true);",
+                  "});",
+                  "const snapshot = { cassettes: body.cassettes.map(c => ({ cassetteNumber: c.number, notes: c.balances.filter(b => b.physicalCount > 0).map(b => ({ currency: b.currency, denomination: String(b.denomination), count: b.physicalCount })) })) };",
+                  "pm.environment.set('reconciliationRequestBody', JSON.stringify(snapshot));",
+                  "const approval = JSON.parse(JSON.stringify(snapshot));",
+                  "const depositOnly = approval.cassettes.find(c => c.cassetteNumber === 1);",
+                  "depositOnly.notes = [{currency:'TRY', denomination:'100', count:11}];",
+                  "pm.environment.set('approvalReconciliationBody', JSON.stringify(approval));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/balances"
+          }
+        },
+        {
+          "name": "09 Reconcile actual physical cash",
+          "description": "Uses the full physical-count snapshot built from the immediately preceding actual balance response.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Physical reconciliation returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Reconciliation matches current physical stock and needs no approval', function () {",
+                  "  pm.expect(body.status).to.eql('COMPLETED');",
+                  "  pm.expect(body.differenceValueByCurrency.every(d => d.differenceValue === 0)).to.eql(true);",
+                  "  pm.expect(body.cassettes.every(c => c.notes.every(n => n.differenceCount === 0))).to.eql(true);",
+                  "  pm.expect(body.createdBy).to.eql('p9-operator');",
+                  "});",
+                  "pm.environment.set('reconciliationId', body.reconciliationId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-User",
+                "value": "p9-operator"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{reconciliationRequestBody}}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/reconciliations"
+          }
+        },
+        {
+          "name": "10 Operations report for ATM",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Operations report returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "const atm = body.atms.find(a => a.atmId === pm.environment.get('atmId'));",
+                  "pm.test('Report has the correct ATM, state, cassette balances and TRY-converted value', function () {",
+                  "  pm.expect(atm).to.exist;",
+                  "  pm.expect(atm.code).to.eql(pm.environment.get('atmCode'));",
+                  "  pm.expect(atm.state).to.eql('MAINTENANCE');",
+                  "  pm.expect(atm.cassettes).to.have.length(5);",
+                  "  pm.expect(atm.physicalValueTry).to.eql(8800);",
+                  "  const cassette = number => atm.cassettes.find(c => c.number === number);",
+                  "  const balance = (number, currency, denomination) => cassette(number).balances.find(b => b.currency === currency && Number(b.denomination) === denomination);",
+                  "  pm.expect(balance(2, 'TRY', 100).physicalCount).to.eql(8);",
+                  "  pm.expect(balance(3, 'TRY', 50).physicalCount).to.eql(4);",
+                  "  pm.expect(balance(4, 'USD', 20).physicalCount).to.eql(3);",
+                  "  pm.expect(balance(5, 'EUR', 50).physicalCount).to.eql(3);",
+                  "  pm.expect(atm.cassettes.every(c => c.balances.every(b => b.reservedCount === 0))).to.eql(true);",
+                  "});",
+                  "pm.environment.set('balancesBeforeReplay', JSON.stringify(atm.cassettes.map(c => ({number:c.number, balances:c.balances.map(b => ({currency:b.currency, denomination:String(b.denomination), physicalCount:b.physicalCount, reservedCount:b.reservedCount, availableCount:b.availableCount})).sort((a,b) => a.currency.localeCompare(b.currency) || Number(a.denomination)-Number(b.denomination))})).sort((a,b) => a.number-b.number)));",
+                  "pm.environment.set('atmReportPhysicalValueTry', String(atm.physicalValueTry));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/reports/operations?atmId={{atmId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Additional Verification",
+      "description": "Run after the required scenario. The included requests establish or use their own low-cash ATM; replay and B9 intentionally use the ATM created by folder 01.",
+      "item": [
+        {
+          "name": "A Health check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Health endpoint returns 200 Healthy', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.text().trim()).to.eql('Healthy');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/plain"
+              }
+            ],
+            "url": "{{baseUrl}}/health"
+          }
+        },
+        {
+          "name": "B Replay successful confirmation with the same idempotency key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Idempotent replay returns 200 and the original transaction', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Replay result is the original successful response', function () {",
+                  "  pm.expect(body.transactionId).to.eql(pm.environment.get('withdrawalTransactionId'));",
+                  "  pm.expect(body.quoteId).to.eql(pm.environment.get('quoteId'));",
+                  "  pm.expect(body.amount).to.eql(300);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"selectedOptionId\":\"{{selectedOptionId}}\"}"
+            },
+            "url": "{{baseUrl}}/api/withdrawal-quotes/{{quoteId}}/confirm"
+          }
+        },
+        {
+          "name": "B1 Verify replay did not debit stock again",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Balance after idempotent replay returns 200', function () { pm.response.to.have.status(200); });",
+                  "const current = pm.response.json().cassettes.map(c => ({number:c.number, balances:c.balances.map(b => ({currency:b.currency, denomination:String(b.denomination), physicalCount:b.physicalCount, reservedCount:b.reservedCount, availableCount:b.availableCount})).sort((a,b) => a.currency.localeCompare(b.currency) || Number(a.denomination)-Number(b.denomination))})).sort((a,b) => a.number-b.number);",
+                  "pm.test('Physical, reserved and available counts are unchanged by replay', function () {",
+                  "  pm.expect(current).to.eql(JSON.parse(pm.environment.get('balancesBeforeReplay')));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/balances"
+          }
+        },
+        {
+          "name": "C B9 reconciliation requires two-person approval",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('High-difference reconciliation returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Difference above TRY 1,000 awaits approval', function () {",
+                  "  pm.expect(body.totalAbsoluteDifferenceTry).to.be.above(1000);",
+                  "  pm.expect(body.status).to.eql('AWAITING_APPROVAL');",
+                  "  pm.expect(body.createdBy).to.eql('officer-1');",
+                  "});",
+                  "pm.environment.set('approvalReconciliationId', body.reconciliationId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-User",
+                "value": "officer-1"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{approvalReconciliationBody}}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/reconciliations"
+          }
+        },
+        {
+          "name": "D Verify service transition is blocked before approval",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Unapproved reconciliation blocks IN_SERVICE with 409', function () {",
+                  "  pm.response.to.have.status(409);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql(409);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"IN_SERVICE\"}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/state"
+          }
+        },
+        {
+          "name": "E Approve with a different user",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Approval returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Officer two approves officer one reconciliation', function () {",
+                  "  pm.expect(body.status).to.eql('APPROVED');",
+                  "  pm.expect(body.createdBy).to.eql('officer-1');",
+                  "  pm.expect(body.approvedBy).to.eql('officer-2');",
+                  "  pm.expect(body.reconciliationId).to.eql(pm.environment.get('approvalReconciliationId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User",
+                "value": "officer-2"
+              }
+            ],
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/reconciliations/{{approvalReconciliationId}}/approve"
+          }
+        },
+        {
+          "name": "F Return approved ATM to service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Approved ATM returns to IN_SERVICE', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().state).to.eql('IN_SERVICE');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"IN_SERVICE\"}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/state"
+          }
+        },
+        {
+          "name": "G Network operations report",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Network operations report returns 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "const atm = body.atms.find(a => a.atmId === pm.environment.get('atmId'));",
+                  "pm.test('Network totals reconcile and include the approved cash adjustment', function () {",
+                  "  pm.expect(atm).to.exist;",
+                  "  pm.expect(atm.state).to.eql('IN_SERVICE');",
+                  "  pm.expect(atm.physicalValueTry).to.eql(9900);",
+                  "  pm.expect(body.networkPhysicalValueTry).to.be.at.least(atm.physicalValueTry);",
+                  "  const summed = body.networkTotalsByCurrency.reduce((sum, total) => sum + Number(total.physicalValueTry), 0);",
+                  "  pm.expect(summed).to.be.closeTo(body.networkPhysicalValueTry, 0.001);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/reports/operations"
+          }
+        },
+        {
+          "name": "H Ledger consistency",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Ledger consistency endpoint returns a consistent ledger', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.atmId).to.eql(pm.environment.get('atmId'));",
+                  "  pm.expect(body.isConsistent).to.eql(true);",
+                  "  pm.expect(body.inconsistentBalanceCount).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/atms/{{atmId}}/ledger/consistency"
+          }
+        },
+        {
+          "name": "I Create separate low-cash verification ATM",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now().toString(36) + Math.random().toString(16).slice(2, 7);",
+                  "pm.environment.set('lowCashAtmCode', 'P9-LC-' + suffix.toUpperCase());",
+                  "pm.environment.unset('lowCashAtmId');",
+                  "pm.environment.unset('lowCashQuoteId');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash ATM returns 201 and starts UNCONFIGURED', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Low-cash test ATM has a fresh unique identity', function () {",
+                  "  pm.expect(body.state).to.eql('UNCONFIGURED');",
+                  "  pm.expect(body.code).to.eql(pm.environment.get('lowCashAtmCode'));",
+                  "});",
+                  "pm.environment.set('lowCashAtmId', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"code\":\"{{lowCashAtmCode}}\"}"
+            },
+            "url": "{{baseUrl}}/api/atms"
+          }
+        },
+        {
+          "name": "J Configure low-cash test ATM",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash configuration returns CONFIGURED', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.state).to.eql('CONFIGURED');",
+                  "  pm.expect(body.cassettes).to.have.length(5);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cassettes\":[{\"number\":1,\"type\":\"DEPOSIT_ONLY\",\"capacity\":10},{\"number\":2,\"type\":\"RECYCLING\",\"currency\":\"TRY\",\"denomination\":\"100\",\"capacity\":10},{\"number\":3,\"type\":\"RECYCLING\",\"currency\":\"TRY\",\"denomination\":\"50\",\"capacity\":10},{\"number\":4,\"type\":\"RECYCLING\",\"currency\":\"USD\",\"denomination\":\"20\",\"capacity\":10},{\"number\":5,\"type\":\"RECYCLING\",\"currency\":\"EUR\",\"denomination\":\"50\",\"capacity\":10}]}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{lowCashAtmId}}/configure"
+          }
+        },
+        {
+          "name": "K Load notes for low-cash threshold crossing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash ATM loads 2 of 10 notes and becomes LOADED', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.state).to.eql('LOADED');",
+                  "  const balance = body.cassettes.find(c => c.number === 2).balances.find(b => b.currency === 'TRY' && Number(b.denomination) === 100);",
+                  "  pm.expect(balance.physicalCount).to.eql(2);",
+                  "  pm.expect(body.cassettes.find(c => c.number === 2).capacity).to.eql(10);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cassettes\":[{\"cassetteNumber\":1,\"notes\":[]},{\"cassetteNumber\":2,\"notes\":[{\"currency\":\"TRY\",\"denomination\":\"100\",\"count\":2}]},{\"cassetteNumber\":3,\"notes\":[]},{\"cassetteNumber\":4,\"notes\":[]},{\"cassetteNumber\":5,\"notes\":[]}]}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{lowCashAtmId}}/load"
+          }
+        },
+        {
+          "name": "L Put low-cash ATM in service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash ATM enters IN_SERVICE', function () {pm.response.to.have.status(200);pm.expect(pm.response.json().state).to.eql('IN_SERVICE');});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"IN_SERVICE\"}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{lowCashAtmId}}/state"
+          }
+        },
+        {
+          "name": "M Cross low-cash threshold with a reserved quote",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash quote reserves the final available notes', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "const option = body.options.find(o => o.kind === 'EXACT' && o.amount === 200);",
+                  "pm.test('Available count crosses from 20% capacity to zero on the recycling cassette', function () {",
+                  "  pm.expect(option).to.exist;",
+                  "  pm.expect(option.allocations.every(a => a.cassetteNumber === 2)).to.eql(true);",
+                  "  pm.expect(option.allocations.reduce((sum, a) => sum + a.count, 0)).to.eql(2);",
+                  "  pm.expect(body.status).to.eql('ACTIVE');",
+                  "});",
+                  "pm.environment.set('lowCashQuoteId', body.quoteId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"cardNumber\":\"{{lowCashCardNumber}}\",\"currency\":\"TRY\",\"requestedAmount\":200}"
+            },
+            "url": "{{baseUrl}}/api/atms/{{lowCashAtmId}}/withdrawal-quotes"
+          }
+        },
+        {
+          "name": "N Release low-cash test reservation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Low-cash test reservation releases safely', function () {",
+                  "  pm.expect([200, 409]).to.include(pm.response.code);",
+                  "  if (pm.response.code === 200) pm.expect(['CANCELLED','EXPIRED']).to.include(pm.response.json().status);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/withdrawal-quotes/{{lowCashQuoteId}}/cancel"
+          }
+        }
+      ]
+    }
+  ]
+}
