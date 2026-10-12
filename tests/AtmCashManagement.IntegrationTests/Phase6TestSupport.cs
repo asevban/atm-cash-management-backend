@@ -97,6 +97,33 @@ internal static class Phase6TestSupport
     internal static Task<HttpResponseMessage> PostCancelAsync(AtmApiFixture fixture, Guid quoteId) =>
         fixture.Client.PostAsync($"/api/withdrawal-quotes/{quoteId}/cancel", content: null);
 
+    internal static async Task<HttpResponseMessage> PostReconciliationAsync(
+        AtmApiFixture fixture,
+        Guid atmId,
+        CashReconciliationRequest reconciliationRequest,
+        string user = "phase6-reconciliation-operator")
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/atms/{atmId}/reconciliations")
+        {
+            Content = JsonContent.Create(reconciliationRequest, options: JsonOptions)
+        };
+        request.Headers.Add("X-User", user);
+        return await fixture.Client.SendAsync(request);
+    }
+
+    internal static async Task<HttpResponseMessage> PostReconciliationApprovalAsync(
+        AtmApiFixture fixture,
+        Guid atmId,
+        Guid reconciliationId,
+        string user)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/atms/{atmId}/reconciliations/{reconciliationId}/approve");
+        request.Headers.Add("X-User", user);
+        return await fixture.Client.SendAsync(request);
+    }
+
     internal static async Task<JsonDocument> ReadAsync(HttpResponseMessage response) =>
         await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
 

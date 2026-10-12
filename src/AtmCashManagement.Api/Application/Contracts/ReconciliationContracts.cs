@@ -32,4 +32,21 @@ public sealed record CashReconciliationResponse(
     DateTimeOffset OccurredAt,
     IReadOnlyList<ReconciliationCassetteResult> Cassettes,
     IReadOnlyList<CurrencyDifferenceResponse> DifferenceValueByCurrency,
-    IReadOnlyList<ReconciliationCassetteChange> ChangedCassettes);
+    IReadOnlyList<ReconciliationCassetteChange> ChangedCassettes,
+    CashReconciliationStatus Status,
+    string CreatedBy,
+    string? ApprovedBy,
+    DateTimeOffset? ApprovedAt,
+    decimal? TotalAbsoluteDifferenceTry,
+    decimal? TryToTryRateSnapshot,
+    decimal? UsdToTryRateSnapshot,
+    decimal? EurToTryRateSnapshot);
+
+public sealed record ReconciliationApprovalResponse(
+    Guid ReconciliationId,
+    Guid AtmId,
+    CashReconciliationStatus Status,
+    string CreatedBy,
+    string? ApprovedBy,
+    DateTimeOffset? ApprovedAt,
+    decimal? TotalAbsoluteDifferenceTry);

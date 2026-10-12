@@ -72,8 +72,21 @@ public sealed class AtmsController(
     public async Task<ActionResult<CashReconciliationResponse>> Reconcile(
         Guid id,
         [FromBody] CashReconciliationRequest request,
+        [FromHeader(Name = "X-User")] string? user,
         CancellationToken cancellationToken) =>
-        Ok(await service.ReconcileAsync(id, request, cancellationToken));
+        Ok(await service.ReconcileAsync(id, request, user, cancellationToken));
+
+    [HttpPost("{id:guid}/reconciliations/{reconciliationId:guid}/approve")]
+    [ProducesResponseType<ReconciliationApprovalResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<ReconciliationApprovalResponse>> ApproveReconciliation(
+        Guid id,
+        Guid reconciliationId,
+        [FromHeader(Name = "X-User")] string? user,
+        CancellationToken cancellationToken) =>
+        Ok(await service.ApproveReconciliationAsync(id, reconciliationId, user, cancellationToken));
 
     [HttpPost("{id:guid}/state")]
     [ProducesResponseType<AtmResponse>(StatusCodes.Status200OK)]

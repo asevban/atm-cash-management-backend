@@ -495,8 +495,15 @@ public sealed class AtmDepositReconciliationTests(AtmApiFixture fixture) : IClas
             new CashDepositRequest(notes, unrecognized),
             JsonOptions);
 
-    private Task<HttpResponseMessage> PostReconciliationAsync(Guid atmId, CashReconciliationRequest request) =>
-        fixture.Client.PostAsJsonAsync($"/api/atms/{atmId}/reconciliations", request, JsonOptions);
+    private async Task<HttpResponseMessage> PostReconciliationAsync(Guid atmId, CashReconciliationRequest reconciliationRequest)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/atms/{atmId}/reconciliations")
+        {
+            Content = JsonContent.Create(reconciliationRequest, options: JsonOptions)
+        };
+        request.Headers.Add("X-User", "reconciliation-operator");
+        return await fixture.Client.SendAsync(request);
+    }
 
     private async Task<CashDeposit> GetDepositAsync(Guid id)
     {

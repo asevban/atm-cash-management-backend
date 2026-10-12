@@ -208,10 +208,7 @@ public sealed class CassetteLedgerConsistencyTests(AtmApiFixture fixture) : ICla
             maintenance.EnsureSuccessStatusCode();
         }
         var reconciliation = await BuildReconciliationSnapshotAsync(atmId, increaseCassetteTwoByOne: true);
-        using (var reconcile = await fixture.Client.PostAsJsonAsync(
-                   $"/api/atms/{atmId}/reconciliations",
-                   reconciliation,
-                   Phase6TestSupport.JsonOptions))
+        using (var reconcile = await Phase6TestSupport.PostReconciliationAsync(fixture, atmId, reconciliation))
         {
             reconcile.EnsureSuccessStatusCode();
         }

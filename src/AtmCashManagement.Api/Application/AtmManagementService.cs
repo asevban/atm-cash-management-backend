@@ -11,6 +11,8 @@ namespace AtmCashManagement.Api.Application;
 
 public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlanner depositAllocationPlanner)
 {
+    private const decimal ReconciliationApprovalThresholdTry = 1000m;
+
     public async Task<AtmResponse> CreateAtmAsync(CreateAtmRequest request, CancellationToken cancellationToken)
     {
         if (request is null || string.IsNullOrWhiteSpace(request.Code))
@@ -463,8 +465,10 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
     public async Task<CashReconciliationResponse> ReconcileAsync(
         Guid id,
         CashReconciliationRequest request,
+        string? createdBy,
         CancellationToken cancellationToken)
     {
+        var operatorName = RequireReconciliationUser(createdBy);
         if (request is null || request.Cassettes is null || request.Cassettes.Count != 5)
         {
             throw AtmApiException.Validation("reconciliation_snapshot_incomplete", "A reconciliation snapshot must include all five cassette slots.");
@@ -521,6 +525,16 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             throw AtmApiException.Conflict("invalid_atm_state", $"Reconciliation is only allowed in MAINTENANCE, not {atm.State}.");
         }
 
+        if (await db.CashReconciliations.AnyAsync(
+                reconciliation => reconciliation.AtmId == atm.Id &&
+                                  reconciliation.Status == CashReconciliationStatus.AwaitingApproval,
+                cancellationToken))
+        {
+            throw AtmApiException.Conflict(
+                "reconciliation_approval_required",
+                "This ATM already has a reconciliation awaiting approval.");
+        }
+
         await db.Entry(atm).Collection(item => item.Cassettes)
             .Query().Include(cassette => cassette.Balances).LoadAsync(cancellationToken);
         CassetteConfigurationValidator.ValidateStored(atm.Cassettes.ToArray());
@@ -553,8 +567,15 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             }
         }
 
+        var ratesToTry = await LoadExchangeRatesToTryAsync(cancellationToken);
         var occurredAt = DateTimeOffset.UtcNow;
-        var reconciliation = new CashReconciliation(atm.Id, occurredAt);
+        var reconciliation = new CashReconciliation(
+            atm.Id,
+            occurredAt,
+            operatorName,
+            ratesToTry[Currency.TRY],
+            ratesToTry[Currency.USD],
+            ratesToTry[Currency.EUR]);
         var responseByCassette = new List<ReconciliationCassetteResult>();
         var changedCassettes = new List<ReconciliationCassetteChange>();
         var differenceValues = Enum.GetValues<Currency>().ToDictionary(currency => currency, _ => 0L);
@@ -638,6 +659,15 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             }
         }
 
+        var totalAbsoluteDifferenceTry = ReconciliationDifferenceCalculator.CalculateAbsoluteDifferenceTry(
+            reconciliation.Lines,
+            ratesToTry);
+        reconciliation.SetValuation(totalAbsoluteDifferenceTry);
+        if (totalAbsoluteDifferenceTry > ReconciliationApprovalThresholdTry)
+        {
+            reconciliation.RequireApproval();
+        }
+
         db.CashReconciliations.Add(reconciliation);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -648,7 +678,66 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             occurredAt,
             responseByCassette,
             differenceValues.Select(pair => new CurrencyDifferenceResponse(pair.Key, pair.Value)).ToArray(),
-            changedCassettes);
+            changedCassettes,
+            reconciliation.Status,
+            reconciliation.CreatedBy,
+            reconciliation.ApprovedBy,
+            reconciliation.ApprovedAt,
+            reconciliation.TotalAbsoluteDifferenceTry,
+            reconciliation.TryToTryRateSnapshot,
+            reconciliation.UsdToTryRateSnapshot,
+            reconciliation.EurToTryRateSnapshot);
+    }
+
+    public async Task<ReconciliationApprovalResponse> ApproveReconciliationAsync(
+        Guid atmId,
+        Guid reconciliationId,
+        string? approvedBy,
+        CancellationToken cancellationToken)
+    {
+        var approver = RequireReconciliationUser(approvedBy);
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var atm = await LockAtmAsync(atmId, cancellationToken);
+        if (atm is null)
+        {
+            throw AtmApiException.NotFound(atmId);
+        }
+
+        var reconciliation = await db.CashReconciliations
+            .FromSqlInterpolated($"SELECT * FROM cash_reconciliations WHERE \"Id\" = {reconciliationId} AND \"AtmId\" = {atmId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (reconciliation is null)
+        {
+            throw AtmApiException.NotFound(
+                "reconciliation_not_found",
+                "Reconciliation not found",
+                $"Reconciliation '{reconciliationId}' was not found for ATM '{atmId}'.");
+        }
+
+        if (reconciliation.Status == CashReconciliationStatus.Approved)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return ToReconciliationApprovalResponse(reconciliation);
+        }
+
+        if (reconciliation.Status != CashReconciliationStatus.AwaitingApproval)
+        {
+            throw AtmApiException.Conflict(
+                "reconciliation_not_awaiting_approval",
+                "Only a reconciliation awaiting approval can be approved.");
+        }
+
+        if (string.Equals(reconciliation.CreatedBy, approver, StringComparison.OrdinalIgnoreCase))
+        {
+            throw AtmApiException.Conflict(
+                "reconciliation_self_approval",
+                "A different user must approve this reconciliation.");
+        }
+
+        reconciliation.Approve(approver, DateTimeOffset.UtcNow);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return ToReconciliationApprovalResponse(reconciliation);
     }
 
     public async Task<AtmResponse> SetStateAsync(
@@ -678,6 +767,17 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
             throw AtmApiException.Conflict(
                 "invalid_state_transition",
                 $"The transition from {atm.State} to {request.State} is not allowed.");
+        }
+
+        if (request.State == AtmLifecycleState.InService &&
+            await db.CashReconciliations.AnyAsync(
+                reconciliation => reconciliation.AtmId == atm.Id &&
+                                  reconciliation.Status == CashReconciliationStatus.AwaitingApproval,
+                cancellationToken))
+        {
+            throw AtmApiException.Conflict(
+                "reconciliation_approval_required",
+                "The ATM cannot return to service while a reconciliation is awaiting approval.");
         }
 
         if (request.State is AtmLifecycleState.Configured or AtmLifecycleState.InService)
@@ -736,6 +836,57 @@ public sealed class AtmManagementService(AtmDbContext db, DepositAllocationPlann
         await db.Atms
             .FromSqlInterpolated($"SELECT * FROM atms WHERE \"Id\" = {id} FOR UPDATE")
             .SingleOrDefaultAsync(cancellationToken);
+
+    private async Task<IReadOnlyDictionary<Currency, decimal>> LoadExchangeRatesToTryAsync(CancellationToken cancellationToken)
+    {
+        var rates = await db.ExchangeRates.AsNoTracking()
+            .Where(rate => rate.QuoteCurrency == Currency.TRY)
+            .ToListAsync(cancellationToken);
+        var ratesByCurrency = rates.ToDictionary(rate => rate.BaseCurrency, rate => rate.Rate);
+        foreach (var currency in Enum.GetValues<Currency>())
+        {
+            if (!ratesByCurrency.TryGetValue(currency, out var rate) || rate <= 0m)
+            {
+                throw AtmApiException.Conflict(
+                    "exchange_rate_missing",
+                    $"A positive {currency}-to-TRY exchange rate is required for reconciliation.");
+            }
+        }
+
+        if (ratesByCurrency[Currency.TRY] != 1m)
+        {
+            throw AtmApiException.Conflict(
+                "exchange_rate_invalid",
+                "The TRY-to-TRY exchange rate must equal 1.");
+        }
+
+        return ratesByCurrency;
+    }
+
+    private static string RequireReconciliationUser(string? user)
+    {
+        var normalized = user?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw AtmApiException.Validation("reconciliation_user_required", "The X-User header is required for reconciliation operations.");
+        }
+
+        if (normalized.Length > 100)
+        {
+            throw AtmApiException.Validation("reconciliation_user_invalid", "The X-User value cannot exceed 100 characters.");
+        }
+
+        return normalized;
+    }
+
+    private static ReconciliationApprovalResponse ToReconciliationApprovalResponse(CashReconciliation reconciliation) => new(
+        reconciliation.Id,
+        reconciliation.AtmId,
+        reconciliation.Status,
+        reconciliation.CreatedBy,
+        reconciliation.ApprovedBy,
+        reconciliation.ApprovedAt,
+        reconciliation.TotalAbsoluteDifferenceTry);
 
     private static AtmResponse ToAtmResponse(Atm atm) => new(
         atm.Id,

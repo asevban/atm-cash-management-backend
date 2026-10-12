@@ -172,17 +172,62 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTimeOffset?>("ApprovedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ApprovedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<Guid>("AtmId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<decimal?>("EurToTryRateSnapshot")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
 
                     b.Property<DateTimeOffset>("OccurredAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<decimal?>("TotalAbsoluteDifferenceTry")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<decimal?>("TryToTryRateSnapshot")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.Property<decimal?>("UsdToTryRateSnapshot")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("AtmId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_cash_reconciliations_pending_approval")
+                        .HasFilter("\"Status\" = 'AwaitingApproval'");
 
                     b.HasIndex("AtmId", "OccurredAt");
 
-                    b.ToTable("cash_reconciliations", (string)null);
+                    b.ToTable("cash_reconciliations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_cash_reconciliations_status_approval", "((\"Status\" = 'Approved' AND \"ApprovedBy\" IS NOT NULL AND \"ApprovedAt\" IS NOT NULL AND lower(\"ApprovedBy\") <> lower(\"CreatedBy\")) OR (\"Status\" <> 'Approved' AND \"ApprovedBy\" IS NULL AND \"ApprovedAt\" IS NULL))");
+
+                            t.HasCheckConstraint("ck_cash_reconciliations_threshold_status", "((\"Status\" = 'Completed' AND (\"TotalAbsoluteDifferenceTry\" IS NULL OR \"TotalAbsoluteDifferenceTry\" <= 1000)) OR (\"Status\" IN ('AwaitingApproval', 'Approved') AND \"TotalAbsoluteDifferenceTry\" IS NOT NULL AND \"TotalAbsoluteDifferenceTry\" > 1000))");
+
+                            t.HasCheckConstraint("ck_cash_reconciliations_valuation", "(\"TotalAbsoluteDifferenceTry\" IS NULL OR (\"TotalAbsoluteDifferenceTry\" >= 0 AND \"TryToTryRateSnapshot\" IS NOT NULL AND \"TryToTryRateSnapshot\" = 1 AND \"UsdToTryRateSnapshot\" IS NOT NULL AND \"UsdToTryRateSnapshot\" > 0 AND \"EurToTryRateSnapshot\" IS NOT NULL AND \"EurToTryRateSnapshot\" > 0))");
+                        });
                 });
 
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.CashReconciliationLine", b =>
@@ -481,6 +526,48 @@ namespace AtmCashManagement.Api.Infrastructure.Persistence.Migrations
                     b.HasIndex("WithdrawalId");
 
                     b.ToTable("confirm_idempotency_records", (string)null);
+                });
+
+            modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.ExchangeRate", b =>
+                {
+                    b.Property<string>("BaseCurrency")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("QuoteCurrency")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<decimal>("Rate")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)");
+
+                    b.HasKey("BaseCurrency", "QuoteCurrency");
+
+                    b.ToTable("exchange_rates", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_exchange_rates_supported_pair", "((\"BaseCurrency\" = 'TRY' AND \"QuoteCurrency\" = 'TRY' AND \"Rate\" = 1) OR (\"BaseCurrency\" IN ('USD', 'EUR') AND \"QuoteCurrency\" = 'TRY' AND \"Rate\" > 0))");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            BaseCurrency = "TRY",
+                            QuoteCurrency = "TRY",
+                            Rate = 1m
+                        },
+                        new
+                        {
+                            BaseCurrency = "USD",
+                            QuoteCurrency = "TRY",
+                            Rate = 35m
+                        },
+                        new
+                        {
+                            BaseCurrency = "EUR",
+                            QuoteCurrency = "TRY",
+                            Rate = 38m
+                        });
                 });
 
             modelBuilder.Entity("AtmCashManagement.Api.Domain.Entities.QuoteReservation", b =>

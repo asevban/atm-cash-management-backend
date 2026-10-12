@@ -16,6 +16,9 @@ public sealed class AtmApiException(
     public static AtmApiException NotFound(Guid id) =>
         new(StatusCodes.Status404NotFound, "atm_not_found", "ATM not found", $"ATM '{id}' was not found.");
 
+    public static AtmApiException NotFound(string errorCode, string title, string message) =>
+        new(StatusCodes.Status404NotFound, errorCode, title, message);
+
     public static AtmApiException Conflict(string errorCode, string message) =>
         new(StatusCodes.Status409Conflict, errorCode, "Operation conflict", message);
 }

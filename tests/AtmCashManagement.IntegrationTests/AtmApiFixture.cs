@@ -83,6 +83,12 @@ public sealed class AtmApiFixture : IAsyncLifetime
             "cassette_movements, cassette_balances, cassettes, atms CASCADE",
             connection);
         await command.ExecuteNonQueryAsync();
+        await using var seedRates = new NpgsqlCommand(
+            "INSERT INTO exchange_rates (\"BaseCurrency\", \"QuoteCurrency\", \"Rate\") VALUES " +
+            "('TRY', 'TRY', 1), ('USD', 'TRY', 35), ('EUR', 'TRY', 38) " +
+            "ON CONFLICT (\"BaseCurrency\", \"QuoteCurrency\") DO UPDATE SET \"Rate\" = EXCLUDED.\"Rate\"",
+            connection);
+        await seedRates.ExecuteNonQueryAsync();
     }
 
     public async Task<int> GetInitialLoadMovementCountAsync()
